@@ -1,0 +1,159 @@
+# Agnes Comic Studio
+
+> 基于 Agnes AI Flash 系列的漫剧/短视频创作套件。统一入口，子 Skill 可独立使用。
+
+## 概述
+
+将"故事概念 → 剧本 → 分镜图 → 短视频"的完整创作流程拆解为可独立调用的子 Skill，每个步骤结束后**询问用户是否继续或修改**，支持反复迭代。所有产出资产统一存储在指定项目文件夹下，用 SQLite 数据库追踪定位。
+
+| 子 Skill | 核心能力 | 对应 Agnes 模型 | 触发场景 |
+|----------|---------|---------------|---------|
+| **agnes-flash-suite** | 基础能力（生图/生视频/对话） | 全系列 | 直接调用 Agnes API |
+| **script-writer** | 剧本 + 角色设定 + 分镜脚本 | `agnes-3.0-flash` | 故事概念 → 结构化剧本 |
+| **storyboard-gen** | 分镜图片 + 角色参考图 | `agnes-image-2.5-flash` | 剧本 → 逐镜头生图 |
+| **video-composer** | 分镜图 → 短视频 | `agnes-video-2.5-flash` | 图片 → 动态视频 |
+| **asset-manager** | 资产追踪、项目文件夹管理 | 无（本地） | 文件定位、修改、复用 |
+
+## 资产目录结构
+
+每个项目自动创建如下文件夹（默认 `~/comic-studio/projects/<project-name>/`）：
+
+```
+project-name/
+├── scripts/          # 剧本 JSON（故事、角色、分镜）
+├── images/           # 分镜图、角色参考图
+├── videos/           # 生成的短视频 MP4
+├── references/       # 用户上传的参考素材
+└── assets.db         # SQLite 数据库（资产索引）
+```
+
+`assets.db` 表结构：
+
+```sql
+CREATE TABLE IF NOT EXISTS assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    asset_type TEXT NOT NULL,   -- script | image | video | reference
+    filename TEXT NOT NULL,
+    filepath TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    tags TEXT                   -- 逗号分隔标签
+);
+```
+
+## 创作流程（主 Pipeline）
+
+```
+用户输入故事概念
+    ↓
+[配置] 选择参数：
+   - 横屏(16:9) / 竖屏(9:16)
+   - 视频时长 (4-12s)
+   - 风格 (动画/写实/水墨/赛博朋克/二次元)
+   - 图片尺寸 (1K/2K)
+    ↓
+[Step 1: script-writer]  生成剧本 JSON
+    ↓  询问用户：继续 / 修改剧本 / 调整角色
+[Step 2: storyboard-gen] 逐镜头生成图片
+    ↓  询问用户：继续 / 重新生成某镜头 / 调整风格
+[Step 3: video-composer] 图片 → 短视频（可选）
+    ↓  询问用户：继续 / 调整时长 / 跳过视频
+输出完整项目
+```
+
+### 配置交互示例
+
+Agent 在用户给出故事概念后，应主动询问：
+
+```
+收到！故事概念已记录。开始前请确认几个参数：
+
+  1. 画面方向：横屏(16:9) / 竖屏(9:16)？
+  2. 视频时长：每段 5s（默认）/ 其他 4-12s？
+  3. 风格：动画（默认）/ 写实 / 水墨 / 赛博朋克 / 二次元？
+  4. 图片尺寸：1K（默认，快）/ 2K（慢一倍）？
+
+回复 "默认" 可全部用默认值，或逐项指定。
+```
+
+用户确认后，参数写入剧本 JSON 的 `config` 字段，后续步骤自动读取。
+
+## ⚠️ Agent 行为准则（每步必须确认）
+
+**每个 Step 执行完毕后，Agent 必须 STOP 并向用户确认，不得自动跳到下一步。**
+
+| Step | 完成后 Agent 应做 |
+|------|-----------------|
+| Step 1 剧本 | 展示剧本摘要（角色数、场景数、logline）→ 问用户：「剧本 OK？要改哪部分？」 |
+| Step 2 分镜图 | 展示生成的图片 → 问用户：「图片满意吗？要重新生成某张？」 |
+| Step 3 视频 | 展示/播放视频 → 问用户：「视频 OK？要调时长或重新生成？」 |
+
+**用户回复"继续/满意/OK"才执行下一步。用户说"改 XX"则回到当前步骤修改后重新确认。**
+
+脚本末尾打印的「下一步」是给用户看的操作提示，Agent 不应忽略它直接链式执行。
+
+## 快速开始（Python）
+
+每个子 Skill 的 `examples/` 目录包含可直接运行的脚本，**支持命令行参数**：
+
+```bash
+# 初始化项目
+python asset-manager/examples/init-project.py "我的漫剧"
+
+# Step 1: 写剧本
+python script-writer/examples/write-script.py "我的漫剧" "一个宇航员在太空遇见一条会说话的鱼"
+
+# 用户确认后 → Step 2: 生成分镜图
+python storyboard-gen/examples/gen-storyboard.py "我的漫剧"
+
+# 用户确认后 → Step 3: 生成视频（可选）
+python video-composer/examples/gen-video.py "我的漫剧"
+```
+
+> 每个 Step 脚本运行结束后会打印"下一步建议"，Agent 根据用户回复决定是否继续、修改或重试。
+
+## 各子 Skill 文档
+
+- [script-writer/SKILL.md](./script-writer/SKILL.md)
+- [storyboard-gen/SKILL.md](./storyboard-gen/SKILL.md)
+- [video-composer/SKILL.md](./video-composer/SKILL.md)
+- [asset-manager/SKILL.md](./asset-manager/SKILL.md)
+- [agnes-flash-suite/SKILL.md](./agnes-flash-suite/SKILL.md)
+
+## 技术规格
+
+| 特性 | 值 |
+|------|-----|
+| 依赖 | Python 3.9+（标准库），无 GPU 要求 |
+| 生图超时 | 360s |
+| 生视频超时 | 600s（通常 2-5 分钟） |
+| 计费 | Agnes AI 当前免费 |
+| 存储 | 本地文件 + SQLite，无云依赖 |
+
+## 速率限制
+
+| 模型 | 限制 | 脚本自动间隔 |
+|------|------|-------------|
+| `agnes-image-2.5-flash` 1K | 20次/分 | 3s |
+| `agnes-image-2.5-flash` 2K | 10次/分 | 7s |
+| `agnes-image-2.5-flash` 3K/4K | 1次/分 | 60s |
+| `agnes-video-2.5-flash` | **1次/分** | 65s |
+
+视频模型额外约束：
+- size 固定 720P（不可选）
+- 时长 4-12s（超出自动裁剪）
+- 图片参考最多 5 张
+- 音频参考最多 3 段
+- 不支持视频参考
+
+## 使用场景
+
+| 需求 | 推荐操作 |
+|------|---------|
+| 快速出一张概念图 | 直接调用 `agnes-flash-suite` 文生图 |
+| 完整漫剧从 0 到成片 | 走主 Pipeline（3 步） |
+| 已有剧本，只要分镜图 | 跳过 Step 1，从 `storyboard-gen` 开始 |
+| 已有图片，想做成视频 | 从 `video-composer` 开始 |
+| 查看/修改已有资产 | 调用 `asset-manager` |
