@@ -65,7 +65,7 @@ def main():
 
     # 1. Concat
     concat_file = video_dir / "concat_final.txt"
-    concat_file.write_text("\n".join(f"file '{c.name}'" for c in clips))
+    concat_file.write_text("\n".join(f"file '{c}'" for c in [str(c) for c in clips]))
     merged = video_dir / "merged-temp.mp4"
     if not run_ffmpeg(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
