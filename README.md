@@ -2,24 +2,29 @@
 
 基于 **Agnes AI Flash** 系列的漫剧 / 短视频创作 Skill 套件。
 
-一个故事概念 → 剧本 → 角色三视图/背景/道具/分镜图 → 短视频，全自动化流水线。每个步骤可暂停确认、修改、重试。
+一个故事概念 → 剧本 → 角色三视图/背景/道具/分镜图 → 短视频 → TTS 配音 + 字幕 + 合成，全自动化流水线。
 
 ## 特性
 
 - 📝 **AI 剧本生成** — 输入故事概念，自动输出结构化剧本（角色 + 场景 + 台词 + 道具）
-- 🎨 **完整视觉资产** — 角色三视图、多表情、纯背景、道具参考、分镜图
-- 🎬 **短视频合成** — 图片/文生视频，自动速率控制
-- 📦 **资产追踪** — SQLite 数据库统一管理所有产出，支持搜索/复用
-- 🔀 **模块化** — 每个步骤独立子 Skill，可单独调用
-- ⚡ **速率限制防范** — 自动 sleep，不会触发 429
+- 🎨 **完整视觉资产** — 角色三视图、多表情、纯背景、道具参考、分镜图（多角色一致性 I2I）
+- 🎬 **短视频合成** — 图生视频（reference 模式）或文生视频，自动速率控制 + 429 重试
+- 🎙 **TTS 配音** — edge-tts 免费中文配音，自动按角色分配音色
+- 💬 **字幕生成** — 自动 SRT 时间轴
+- 🔊 **BGM + 合成** — ffmpeg 一步合成最终成片
+- 📦 **资产追踪** — SQLite 数据库统一管理，支持搜索/复用
+- 📋 **模板预设** — 抖音/B站/小红书/微博 一键配置
+- 🔀 **模块化** — 6 个子 Skill，可单独调用
+- ⚡ **速率限制防范** — 自动 sleep + 429 指数退避
 
 ## 前置条件
 
 | 依赖 | 说明 |
 |------|------|
-| Python 3.9+ | 仅用标准库，无第三方包 |
+| Python 3.9+ | 仅用标准库 + `edge-tts`（TTS 需要） |
 | Agnes AI API Key | 免费注册 [platform.agnes-ai.cn](https://platform.agnes-ai.cn) |
-| ffmpeg（可选） | 仅视频拼接需要：`apt install ffmpeg` |
+| ffmpeg（可选） | 视频拼接/合成需要：`apt install ffmpeg` |
+| edge-tts（可选） | TTS 配音：`pip install -i https://mirrors.aliyun.com/pypi/simple/ edge-tts` |
 
 ## 快速开始
 
@@ -30,128 +35,134 @@ cp .env.example .env
 # 编辑 .env，填入你的 AGNESAI_API_KEY
 ```
 
+可选环境变量（写入 `.env`）：
+```
+AGNESAI_API_KEY=sk-xxx
+COMIC_STUDIO_ROOT=/path/to/your/projects   # 自定义项目根目录（默认 ~/comic-studio/projects）
+```
+
 ### 2. 初始化项目
 
 ```bash
 python asset-manager/examples/init-project.py "我的漫剧"
 ```
 
-创建文件夹结构 + SQLite 数据库：
-
-```
-~/comic-studio/projects/我的漫剧/
-├── scripts/
-├── images/
-├── videos/
-├── references/
-└── assets.db
-```
-
-### 3. 生成剧本（Step 1）
+### 3. 选择预设（可选）
 
 ```bash
-python script-writer/examples/write-script.py "我的漫剧" "故事概念" [风格] [方向] [时长] [尺寸]
+# 查看可用预设
+python script-writer/examples/presets.py
+
+# 使用预设（输出参数供下一步使用）
+python script-writer/examples/presets.py douyin
+# 输出: orientation=portrait, aspect_ratio=9:16, video_duration=5, image_size=1K, style=动画
 ```
 
-参数说明：
-| 参数 | 选项 | 默认 |
-|------|------|------|
-| 风格 | 动画/写实/水墨/赛博朋克/二次元 | 动画 |
-| 方向 | landscape(16:9)/portrait(9:16) | landscape |
-| 时长 | 4-12（秒） | 5 |
-| 尺寸 | 1K/2K | 1K |
+预设列表：
+| 名称 | 用途 | 方向 | 时长 | 风格 |
+|------|------|------|------|------|
+| `douyin` | 抖音竖屏短剧 | 9:16 | 5s | 动画 |
+| `bilibili` | B站横屏动画 | 16:9 | 8s | 二次元 |
+| `xhs` | 小红书图文漫 | 3:4 | 4s | 二次元 |
+| `weibo` | 朋友圈短动画 | 1:1 | 4s | 动画 |
+
+### 4. 生成剧本（Step 1）
+
+```bash
+python script-writer/examples/write-script.py "项目名" "故事概念" [风格] [方向] [时长] [尺寸]
+```
 
 示例：
 ```bash
-python script-writer/examples/write-script.py "我的漫剧" "宇航员在太空遇见一条鱼" 动画 portrait 8 2K
+python script-writer/examples/write-script.py "暴雨外卖" "外卖小哥暴雨夜送最后一单" 动画 portrait 5 1K
 ```
 
-输出：`scripts/我的漫剧-script.json`（角色 + 场景 + 道具 + config）
+输出：`scripts/项目名-script.json`
 
-### 4. 生成视觉资产（Step 2）
+### 5. 生成视觉资产（Step 2）
 
 ```bash
 # 角色三视图
-python storyboard-gen/examples/gen-character.py "我的漫剧" "角色名" three-view
+python storyboard-gen/examples/gen-character.py "项目名" "角色名" three-view
 
 # 角色多表情
-python storyboard-gen/examples/gen-character.py "我的漫剧" "角色名" expression
+python storyboard-gen/examples/gen-character.py "项目名" "角色名" expression
 
-# 纯背景图（无角色）
-python storyboard-gen/examples/gen-background.py "我的漫剧" [场景ID]
+# 纯背景（无角色）
+python storyboard-gen/examples/gen-background.py "项目名" [场景ID]
 
-# 道具参考图
-python storyboard-gen/examples/gen-props.py "我的漫剧" [道具名]
+# 道具/物品
+python storyboard-gen/examples/gen-props.py "项目名" [道具名]
 
-# 全套分镜（角色参考 + 逐场景图）
-python storyboard-gen/examples/gen-storyboard.py "我的漫剧"
+# 全套分镜（角色参考 + 逐场景图，自动存 URL）
+python storyboard-gen/examples/gen-storyboard.py "项目名"
 ```
 
-输出：`images/` 目录下的 PNG 文件
+输出：`images/` + `scripts/项目名-image-urls.json`（URL 供视频 reference 模式用）
 
-### 5. 生成视频（Step 3，可选）
+### 6. 生成视频（Step 3）
 
 ```bash
-# 生成所有场景视频
-python video-composer/examples/gen-video.py "我的漫剧"
+# 全量（自动读 image-urls.json 做 reference 模式）
+python video-composer/examples/gen-video.py "项目名"
 
-# 只生成某个场景
-python video-composer/examples/gen-video.py "我的漫剧" --scene 3
+# 单场景
+python video-composer/examples/gen-video.py "项目名" --scene 3
 
-# 指定时长
-python video-composer/examples/gen-video.py "我的漫剧" --duration 8
+# 自定义时长
+python video-composer/examples/gen-video.py "项目名" --duration 8
 
-# 拼接完整视频（需要 ffmpeg）
-python video-composer/examples/merge-videos.py "我的漫剧"
+# 拼接
+python video-composer/examples/merge-videos.py "项目名"
 ```
 
-输出：`videos/scene-N.mp4` + `videos/我的漫剧-full.mp4`
-
-### 6. 查看/管理资产
+### 7. TTS 配音 + 字幕 + 合成（Step 4）
 
 ```bash
-# 列出所有资产
-python asset-manager/examples/list-assets.py "我的漫剧"
+# 生成配音
+python post-production/examples/gen-tts.py "项目名"
 
-# 按类型过滤
-python asset-manager/examples/list-assets.py "我的漫剧" image
+# 生成字幕
+python post-production/examples/gen-subtitles.py "项目名"
 
-# 搜索
-python asset-manager/examples/find-asset.py "我的漫剧" "花"
-
-# 手动记录新资产
-python asset-manager/examples/track-asset.py "我的漫剧" reference "path/to/file.png" "描述" "tag1,tag2"
+# 最终合成（视频 + 配音 + BGM + 字幕）
+python post-production/examples/final-compose.py "项目名" [--bgm music.mp3]
 ```
 
-## 完整工作流示例
+输出：`videos/项目名-final.mp4`
+
+### 8. 查看/管理资产
+
+```bash
+python asset-manager/examples/list-assets.py "项目名" [类型]
+python asset-manager/examples/find-asset.py "项目名" "关键词"
+python asset-manager/examples/track-asset.py "项目名" reference "path" "描述" "tag1,tag2"
+```
+
+## 完整工作流（Agent 交互示例）
 
 ```
-用户："帮我做一个关于外卖小哥在暴雨夜送最后一单的漫剧"
+用户："帮我做一个关于暴雨夜外卖的漫剧"
     ↓
-Agent 询问配置：
-  "横屏/竖屏？时长？风格？尺寸？"
+Agent："收到！请确认参数：
+        1. 画面方向？ 2. 时长？ 3. 风格？ 4. 尺寸？
+        （回复'默认'或选预设：douyin/bilibili/xhs/weibo）"
 用户："竖屏，5秒，动画，1K"
     ↓
-Step 1: write-script.py "暴雨外卖" "概念" 动画 portrait 5 1K
-  → 生成剧本 JSON（2角色 + 6场景 + 3道具）
-  → Agent 展示剧本，问用户："OK？要改哪部分？"
+Step 1: write-script.py → 展示剧本 → "OK？要改哪部分？"
 用户："继续"
     ↓
-Step 2a: gen-character.py "暴雨外卖" "阿杰" three-view
-Step 2b: gen-background.py "暴雨外卖"
-Step 2c: gen-props.py "暴雨外卖"
-Step 2d: gen-storyboard.py "暴雨外卖"
-  → 生成全套图片
-  → Agent 展示图片，问用户："满意吗？要重来哪张？"
+Step 2a: gen-character.py three-view ×2
+Step 2b: gen-background.py
+Step 2c: gen-props.py
+Step 2d: gen-storyboard.py → 展示图片 → "满意吗？"
 用户："继续"
     ↓
-Step 3: gen-video.py "暴雨外卖"
-  → 逐段生成视频（65s 间隔）
-  → Agent 播放视频，问用户："OK？要调时长？"
-用户："拼接"
+Step 3: gen-video.py → 播放视频 → "OK？"
+用户："加配音和字幕"
     ↓
-merge-videos.py "暴雨外卖"
-  → 输出完整视频
+Step 4: gen-tts.py → gen-subtitles.py → final-compose.py
+       → 播放最终成片 → "完成 🎬"
 ```
 
 ## 项目文件结构
@@ -164,73 +175,73 @@ agnes-comic-studio/
 ├── .env.example                      # API Key 模板
 ├── .gitignore
 │
-├── agnes-flash-suite/                # 子 Skill: 基础 API 调用
-│   ├── SKILL.md
-│   └── examples/
-│       ├── load_env.py               # .env 加载（所有子 Skill 共用）
-│       ├── basic-chat.py             # 对话
-│       ├── text-to-image.py          # 文生图
-│       ├── text-to-video.py          # 文生视频
-│       └── poll-video.py             # 视频任务轮询
-│
-├── script-writer/                    # 子 Skill: Step 1 剧本生成
+├── agnes-flash-suite/                # 子 Skill 1: 基础 API 调用
 │   ├── SKILL.md
 │   └── examples/
 │       ├── load_env.py
-│       ├── track.py                  # 资产记录（共用模块）
-│       ├── write-script.py           # 生成完整剧本 JSON
-│       └── refine-script.py          # 修改单个角色描述
+│       ├── basic-chat.py
+│       ├── text-to-image.py
+│       ├── text-to-video.py
+│       └── poll-video.py
 │
-├── storyboard-gen/                   # 子 Skill: Step 2 视觉资产
+├── script-writer/                    # 子 Skill 2: 剧本生成
 │   ├── SKILL.md
 │   └── examples/
 │       ├── load_env.py
 │       ├── track.py
-│       ├── gen-storyboard.py         # 全套分镜（角色+场景）
-│       ├── gen-character.py          # 角色图（sheet/three-view/expression）
-│       ├── gen-background.py         # 纯背景（无角色）
-│       └── gen-props.py             # 道具/物品参考
+│       ├── presets.py                # 模板预设（douyin/bilibili/xhs/weibo）
+│       ├── write-script.py
+│       └── refine-script.py
 │
-├── video-composer/                   # 子 Skill: Step 3 视频合成
+├── storyboard-gen/                   # 子 Skill 3: 视觉资产
 │   ├── SKILL.md
 │   └── examples/
 │       ├── load_env.py
 │       ├── track.py
-│       ├── gen-video.py              # 逐场景生成视频
-│       ├── poll-video.py             # 查询单个视频任务
-│       └── merge-videos.py           # ffmpeg 拼接
+│       ├── gen-storyboard.py         # 分镜 + URL 存储 + 多角色 I2I
+│       ├── gen-character.py          # sheet / three-view / expression
+│       ├── gen-background.py         # 纯背景
+│       └── gen-props.py              # 道具
 │
-└── asset-manager/                    # 子 Skill: 资产管理
+├── video-composer/                   # 子 Skill 4: 视频合成
+│   ├── SKILL.md
+│   └── examples/
+│       ├── load_env.py
+│       ├── track.py
+│       ├── gen-video.py              # reference 模式 + 429 重试
+│       ├── poll-video.py
+│       └── merge-videos.py
+│
+├── post-production/                  # 子 Skill 5: 后期制作
+│   ├── SKILL.md
+│   └── examples/
+│       ├── load_env.py
+│       ├── track.py
+│       ├── gen-tts.py                # edge-tts 配音
+│       ├── gen-subtitles.py          # SRT 字幕
+│       └── final-compose.py          # ffmpeg 最终合成
+│
+└── asset-manager/                    # 子 Skill 6: 资产管理
     ├── SKILL.md
     └── examples/
         ├── load_env.py
-        ├── track.py                  # ensure_project_db + track_file
-        ├── init-project.py           # 初始化项目文件夹 + DB
-        ├── track-asset.py            # 记录新资产
-        ├── list-assets.py            # 列出资产
-        └── find-asset.py            # 搜索资产
+        ├── track.py
+        ├── init-project.py
+        ├── track-asset.py
+        ├── list-assets.py
+        └── find-asset.py
 ```
 
 ## 资产数据库（assets.db）
 
-每个项目一个 SQLite 文件，表结构：
+每个项目一个 SQLite，自动记录所有产出：
 
 ```sql
-CREATE TABLE assets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    asset_type TEXT NOT NULL,  -- script | image | image_three-view | image_expression
-                                -- | image_background | image_prop | video | reference
-    filename TEXT NOT NULL,
-    filepath TEXT NOT NULL,
-    description TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT,
-    tags TEXT
-);
+-- asset_type 值:
+--   script | image | image_three-view | image_expression
+--   | image_background | image_prop | video | video_final
+--   | audio | subtitle | reference
 ```
-
-每次生成文件时自动记录，支持 `find-asset.py` 按关键词/标签搜索。
 
 ## 速率限制
 
@@ -239,9 +250,9 @@ CREATE TABLE assets (
 | `agnes-image-2.5-flash` 1K | 20次/分 | 3s |
 | `agnes-image-2.5-flash` 2K | 10次/分 | 7s |
 | `agnes-image-2.5-flash` 3K/4K | 1次/分 | 60s |
-| `agnes-video-2.5-flash` | **1次/分** | 65s |
+| `agnes-video-2.5-flash` | **1次/分** | 65s + 429 指数退避 |
 
-视频模型约束：size 固定 720P，时长 4-12s，图片参考最多 5 张，不支持视频参考。
+视频约束：size 固定 720P，时长 4-12s，图片参考最多 5 张。
 
 ## 作为 RikkaHub Skill 安装
 
@@ -250,9 +261,10 @@ skill_install_from_url https://raw.githubusercontent.com/Lusensec/agnes-comic-st
 ```
 
 安装后对 AI 说：
-- "帮我写一个关于 XX 的漫剧剧本"
-- "生成这个项目的角色三视图和背景"
-- "把分镜做成视频"
+- "用 douyin 预设帮我做 XX 漫剧"
+- "生成角色三视图和道具"
+- "加配音和字幕"
+- "拼接最终成片"
 
 ## 许可
 
