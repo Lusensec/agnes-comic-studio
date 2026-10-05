@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate storyboard images from script JSON using agnes-image-2.5-flash.
+"""Generate storyboard images using multi-reference I2I.
 
-Rate limits (agnes-image-2.5-flash):
-  1K: 20/min | 2K: 10/min | 3K: 1/min | 4K: 1/min
-Script auto-inserts appropriate sleep between calls.
-
-Also stores image URLs in scripts/<project>-image-urls.json for video reference mode.
+Reference strategy:
+  - Character three-view (strongest identity anchor)
+  - Current scene background (angle matching: wide/mid/close)
+  - Related props for this scene (if defined in script)
+  Max 5 refs total (Agnes limit).
 
 Usage:
     python gen-storyboard.py "项目名" [--scene N] [--size 1K|2K]
@@ -14,7 +14,6 @@ import json
 import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -29,11 +28,10 @@ STYLE_PREFIX = {
     "赛博朋克": "cyberpunk, neon lights, futuristic, dark tones, ",
     "二次元": "2D anime, cute, pastel colors, soft shading, ",
 }
-
 SLEEP_BY_SIZE = {"1K": 3, "2K": 7, "3K": 60, "4K": 60}
 
 
-def gen_image(prompt: str, size="1K", ratio="16:9", ref_image_urls: list = None) -> str:
+def gen_image(prompt: str, size="1K", ratio="16:9", ref_urls: list = None) -> str:
     body = {
         "model": "agnes-image-2.5-flash",
         "prompt": prompt,
@@ -41,9 +39,8 @@ def gen_image(prompt: str, size="1K", ratio="16:9", ref_image_urls: list = None)
         "ratio": ratio,
         "extra_body": {"response_format": "url"}
     }
-    if ref_image_urls:
-        # Max 5 reference images
-        body["extra_body"]["image"] = ref_image_urls[:5]
+    if ref_urls:
+        body["extra_body"]["image"] = ref_urls[:5]  # Max 5
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         BASE_IMG, data=data,
@@ -54,19 +51,12 @@ def gen_image(prompt: str, size="1K", ratio="16:9", ref_image_urls: list = None)
     return json.loads(resp)["data"][0]["url"]
 
 
-def save_image_urls(project: str, urls: dict):
-    """Save image URLs to scripts/<project>-image-urls.json for video reference."""
-    proj_dir = PROJECT_ROOT / project
-    urls_file = proj_dir / "scripts" / f"{project}-image-urls.json"
-    urls_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Merge with existing
-    existing = {}
-    if urls_file.exists():
-        existing = json.loads(urls_file.read_text())
-    existing.update(urls)
-    urls_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
-    print(f"\n📝 图片 URL 已保存: {urls_file.name}")
+def load_urls(project: str) -> dict:
+    """Load all stored image URLs."""
+    f = PROJECT_ROOT / project / "scripts" / f"{project}-image-urls.json"
+    if f.exists():
+        return json.loads(f.read_text())
+    return {}
 
 
 def main():
@@ -81,11 +71,8 @@ def main():
         scene_filter = int(sys.argv[sys.argv.index("--scene") + 1])
     if "--size" in sys.argv:
         image_size = sys.argv[sys.argv.index("--size") + 1]
-        if image_size not in SLEEP_BY_SIZE:
-            print(f"[ERROR] 无效尺寸 {image_size}，可选: {list(SLEEP_BY_SIZE.keys())}")
-            sys.exit(1)
 
-    sleep_sec = SLEEP_BY_SIZE[image_size] if image_size else SLEEP_BY_SIZE.get("1K", 3)
+    sleep_sec = SLEEP_BY_SIZE.get(image_size or "1K", 3)
 
     proj_dir = PROJECT_ROOT / project
     img_dir = proj_dir / "images"
@@ -93,86 +80,87 @@ def main():
 
     scripts = list((proj_dir / "scripts").glob(f"{project}-script.json"))
     if not scripts:
-        print(f"[ERROR] 未找到剧本，请先运行 write-script.py", file=sys.stderr)
+        print("[ERROR] 未找到剧本", file=sys.stderr)
         sys.exit(1)
     script = json.loads(scripts[0].read_text())
-    style = script.get("style", "动画")
-    style_prefix = STYLE_PREFIX.get(style, "")
     config = script.get("config", {})
+    style = config.get("style", "动画")
+    style_prefix = STYLE_PREFIX.get(style, "")
     if image_size is None:
         image_size = config.get("image_size", "1K")
         sleep_sec = SLEEP_BY_SIZE.get(image_size, 3)
     aspect_ratio = config.get("aspect_ratio", "16:9")
 
+    # Load all available URLs (character three-views, backgrounds, props)
+    urls = load_urls(project)
+
+    # Build character three-view refs (one per character)
+    char_refs = [v for k, v in urls.items() if "three-view" in k]
+
     scenes = script.get("scenes", [])
     if scene_filter:
         scenes = [s for s in scenes if s.get("scene_id") == scene_filter]
-    if not scenes:
-        print(f"未找到 scene {scene_filter}")
-        sys.exit(1)
 
-    print(f"⏱  图片尺寸: {image_size} | 间隔: {sleep_sec}s")
+    print(f"📷 生成 {len(scenes)} 张分镜图...")
+    print(f"   参考策略: 角色三视图({len(char_refs)}张) + 场景背景 + 相关道具")
+    print(f"   每场景最多 5 张参考\n")
 
-    # === Generate character reference images (collect ALL URLs for multi-character I2I) ===
-    char_urls = {}  # {name: url}
-    chars = script.get("characters", [])
-    print(f"\n🎨 生成 {len(chars)} 张角色参考图...")
-    for i, ch in enumerate(chars):
-        name = ch["name"]
-        desc = ch.get("description", name)
-        out_file = img_dir / f"character-{name}.png"
-        if out_file.exists() and not scene_filter:
-            print(f"  ⏭  [{name}] 已存在，跳过")
-            continue
-        print(f"  🎨 [{i+1}/{len(chars)}] {name}")
-        prompt = f"{style_prefix}character design sheet, full body, {desc}, white background"
-        url = gen_image(prompt, size=image_size, ratio="1:1")
-        char_urls[name] = url
-        out_file.write_bytes(urllib.request.urlopen(url).read())
-        track_file(project, "image", str(out_file), f"角色: {name}", f"style={style}")
-        print(f"     ✅ {out_file.name}")
-        if i < len(chars) - 1:
-            time.sleep(sleep_sec)
-
-    # Save character URLs
-    if char_urls:
-        save_image_urls(project, {f"char-{k}": v for k, v in char_urls.items()})
-
-    # === Generate scene images (use ALL character URLs as multi-reference) ===
-    # This fixes issue #5: multi-character consistency
-    all_char_refs = list(char_urls.values())[:5]  # Max 5 refs
-    print(f"\n📷 生成 {len(scenes)} 张分镜图...")
-    scene_urls = {}
-
+    url_map = {}
     for i, scene in enumerate(scenes):
         sid = scene.get("scene_id", 0)
-        desc_en = scene.get("description", scene.get("description_zh", ""))
-        prompt = f"{style_prefix}{desc_en}"
+        desc_en = scene.get("description", "")
+        desc_zh = scene.get("description_zh", desc_en)
 
-        print(f"  [{i+1}/{len(scenes)}] scene-{sid}: {scene.get('title', '')[:30]}...")
-        img_url = gen_image(prompt, size=image_size, ratio=aspect_ratio,
-                            ref_image_urls=all_char_refs if all_char_refs else None)
-        scene_urls[f"scene-{sid}"] = img_url
+        # Build reference set for this scene
+        refs = []
+        # 1. Character three-view (highest priority)
+        refs.extend(char_refs[:2])  # Max 2 character refs
+
+        # 2. Scene background (pick "mid" angle as best match for storyboard)
+        bg_key = f"bg-{sid}-mid"
+        if bg_key in urls:
+            refs.append(urls[bg_key])
+
+        # 3. Related props (from scene.props if defined)
+        scene_props = scene.get("props", [])
+        for pname in scene_props[:2]:  # Max 2 prop refs
+            prop_key = f"prop-{pname}-front"
+            if prop_key in urls:
+                refs.append(urls[prop_key])
+
+        refs = refs[:5]  # Hard limit
+
+        # Build prompt with explicit reference guidance
+        ref_desc = ""
+        if refs:
+            ref_desc = f" [Reference images: {', '.join([r.split('/')[-1][:20] for r in refs])}]"
+        prompt = f"{style_prefix}{desc_en}. Maintain character consistency with reference images.{ref_desc}"
+
+        print(f"  [{i+1}/{len(scenes)}] scene-{sid}: {scene.get('title','')[:25]}... ({len(refs)} refs)")
+        img_url = gen_image(prompt, size=image_size, ratio=aspect_ratio, ref_urls=refs)
+        url_map[f"scene-{sid}"] = img_url
 
         out_file = img_dir / f"scene-{sid}.png"
         out_file.write_bytes(urllib.request.urlopen(img_url).read())
         track_file(project, "image", str(out_file), f"分镜 {sid}: {scene.get('title','')}",
-                   f"style={style},scene={sid}")
+                   f"style={style},refs={len(refs)}")
         print(f"     ✅ {out_file.name}")
 
         if i < len(scenes) - 1:
             time.sleep(sleep_sec)
 
-    # Save scene URLs (for video reference mode)
-    if scene_urls:
-        save_image_urls(project, scene_urls)
+    # Save scene URLs
+    if url_map:
+        save_file = proj_dir / "scripts" / f"{project}-image-urls.json"
+        existing = json.loads(save_file.read_text()) if save_file.exists() else {}
+        existing.update(url_map)
+        save_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+        print(f"\n📝 分镜 URL 已保存")
 
-    print(f"\n✅ 分镜图完成 ({len(scenes)} 张)")
-    print(f"   角色参考 ({len(all_char_refs)} 张) 用于所有场景 I2I → 多角色一致性")
-    print(f"\n下一步：")
+    print(f"\n✅ 分镜图完成 ({len(scenes)} 张)，每场景 {len(refs)} 张参考 I2I")
+    print("\n下一步：")
     print(f"  [1] 生成视频 → python video-composer/examples/gen-video.py \"{project}\"")
-    print(f"  [2] 重新生成某场景 → python gen-storyboard.py \"{project}\" --scene N")
-    print(f"  [3] 调整风格 → 修改剧本 config 后重新运行")
+    print(f"  [2] 重新生成 → python gen-storyboard.py \"{project}\" --scene N")
 
 
 if __name__ == "__main__":
