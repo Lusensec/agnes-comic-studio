@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Generate short video clips from storyboard.
 
+Uses image reference mode when URLs are available (from gen-storyboard.py).
+Falls back to text mode if no URLs stored.
+
 Rate limit (agnes-video-2.5-flash):
   - 1 次/分钟（每次提交间隔 >= 65s）
   - 图片参考最多 5 张
@@ -11,7 +14,6 @@ Rate limit (agnes-video-2.5-flash):
 
 Usage:
     python gen-video.py "项目名" [--scene N] [--duration 5]
-    duration: 4-12 (default 5)
 """
 import json
 import sys
@@ -25,8 +27,7 @@ from track import track_file
 
 BASE_VIDEO = "https://api.agnes-ai.cn/v1/videos"
 BASE_POLL = "https://api.agnes-ai.cn/agnesapi"
-
-VIDEO_INTERVAL_SEC = 65  # 1/min rate limit, add buffer
+VIDEO_INTERVAL_SEC = 65
 
 
 def validate_duration(seconds: str) -> str:
@@ -40,27 +41,33 @@ def validate_duration(seconds: str) -> str:
     return str(s)
 
 
-def submit_video(prompt: str, ref_image_url: str = "", mode: str = "text",
-                 seconds: str = "5", image_refs: list = None, aspect_ratio: str = "16:9") -> str:
-    # Validate
-    if len(image_refs or []) > 5:
-        print("⚠️  图片参考超过 5 张，截取前 5 张")
-        image_refs = (image_refs or [])[:5]
+def load_image_urls(project: str) -> dict:
+    """Load stored image URLs from gen-storyboard output."""
+    urls_file = PROJECT_ROOT / project / "scripts" / f"{project}-image-urls.json"
+    if urls_file.exists():
+        return json.loads(urls_file.read_text())
+    return {}
+
+
+def submit_video(prompt: str, image_refs: list = None,
+                 seconds: str = "5", aspect_ratio: str = "16:9") -> str:
+    """Submit video task. Uses reference mode if image_refs provided."""
+    # Validate: max 5 image refs
+    refs = (image_refs or [])[:5]
 
     body = {
         "model": "agnes-video-2.5-flash",
         "prompt": prompt,
         "seconds": seconds,
-        "mode": mode,
-        "size": "720P",  # Fixed
-        "aspect_ratio": aspect_ratio
+        "size": "720P",
+        "aspect_ratio": aspect_ratio,
     }
-    if ref_image_url and ref_image_url.startswith("http"):
+
+    if refs:
         body["mode"] = "reference"
-        body["images"] = [ref_image_url]
-    elif image_refs:
-        body["mode"] = "reference"
-        body["images"] = image_refs[:5]
+        body["images"] = refs
+    else:
+        body["mode"] = "text"
 
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -91,6 +98,20 @@ def poll_video(video_id: str, timeout=600, interval=30) -> str:
     raise TimeoutError(f"Video {video_id} not ready after {timeout}s")
 
 
+def retry_on_429(func, max_retries=3):
+    """Retry a function call on 429 with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries - 1:
+                wait = 65 * (attempt + 1)
+                print(f"     ⏱  429 限流，等待 {wait}s 后重试 ({attempt+1}/{max_retries})...")
+                time.sleep(wait)
+            else:
+                raise
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -98,7 +119,7 @@ def main():
 
     project = sys.argv[1]
     scene_filter = None
-    duration = None  # None = read from script config
+    duration = None
     if "--scene" in sys.argv:
         scene_filter = int(sys.argv[sys.argv.index("--scene") + 1])
     if "--duration" in sys.argv:
@@ -109,19 +130,21 @@ def main():
     video_dir.mkdir(parents=True, exist_ok=True)
     img_dir = proj_dir / "images"
 
-    # Load script
     scripts = list((proj_dir / "scripts").glob(f"{project}-script.json"))
     script = json.loads(scripts[0].read_text()) if scripts else {}
     scenes = script.get("scenes", [])
-    # Read config: duration, aspect_ratio
     config = script.get("config", {})
     if duration is None:
         duration = validate_duration(str(config.get("video_duration", "5")))
     aspect_ratio = config.get("aspect_ratio", "16:9")
 
+    # Load stored image URLs (for reference mode)
+    image_urls = load_image_urls(project)
+    has_urls = len(image_urls) > 0
+    mode_label = "reference (图生视频)" if has_urls else "text (文生视频)"
+
     if scene_filter:
         scenes = [s for s in scenes if s.get("scene_id") == scene_filter]
-
     if not scenes:
         scene_files = sorted(img_dir.glob("scene-*.png"))
         scenes = [{"scene_id": int(f.stem.split("-")[1]), "title": f.stem,
@@ -129,8 +152,10 @@ def main():
 
     total = len(scenes)
     print(f"🎬 生成 {total} 个视频片段")
-    print(f"   时长: {duration}s/段 | 总计约 {total * (int(duration) + 30)}s (~{total * 5}min)")
-    print(f"   速率限制: 1次/分钟，自动间隔 {VIDEO_INTERVAL_SEC}s\n")
+    print(f"   模式: {mode_label}")
+    print(f"   时长: {duration}s/段 | 间隔: {VIDEO_INTERVAL_SEC}s")
+    est_min = total * 5
+    print(f"   预计总耗时: ~{est_min} 分钟\n")
 
     for i, scene in enumerate(scenes):
         sid = scene.get("scene_id", 0)
@@ -139,24 +164,41 @@ def main():
             print(f"  ⏭  scene-{sid} 已存在，跳过")
             continue
 
+        # Build image refs for this scene
+        refs = []
+        if has_urls:
+            # Use the specific scene image + character refs
+            scene_key = f"scene-{sid}"
+            if scene_key in image_urls:
+                refs.append(image_urls[scene_key])
+            # Add character refs
+            char_refs = [v for k, v in image_urls.items() if k.startswith("char-")]
+            refs.extend(char_refs[:4])  # Keep total <= 5
+            refs = refs[:5]
+
         # Build prompt
         desc_en = scene.get("description", "")
         desc_zh = scene.get("description_zh", "")
-        prompt = f"Anime style, smooth animation. {desc_en}. {desc_zh[:60]}"
+        style = config.get("style", "动画")
+        style_word = {"动画": "anime", "写实": "cinematic", "水墨": "ink wash",
+                      "赛博朋克": "cyberpunk", "二次元": "2D anime"}.get(style, "anime")
+        prompt = f"{style_word} style, smooth animation. {desc_en}. {desc_zh[:60]}"
 
         print(f"  🎥 [{i+1}/{total}] scene-{sid}: {scene.get('title', '')[:30]}...")
         try:
-            video_id = submit_video(prompt, mode="text", seconds=duration, aspect_ratio=aspect_ratio)
-            print(f"     submitted: {video_id}")
+            video_id = retry_on_429(
+                lambda: submit_video(prompt, refs, duration, aspect_ratio)
+            )
+            print(f"     submitted: {video_id} ({len(refs)} refs)")
             video_url = poll_video(video_id)
             mp4_data = urllib.request.urlopen(video_url).read()
             out_file.write_bytes(mp4_data)
+            track_file(project, "video", str(out_file), f"视频 scene-{sid}", f"duration={duration}s")
             print(f"     ✅ {out_file.name} ({len(mp4_data)//1024}KB)")
-            track_file(project, "video", str(out_file), f"视频 scene-{sid}: {scene.get('title','')}", f"duration={duration}s")
         except Exception as e:
             print(f"     ❌ 失败: {e}")
 
-        # Rate limit: wait before next submission
+        # Rate limit: wait before next
         if i < total - 1:
             remaining = total - i - 1
             print(f"     ⏱  等待 {VIDEO_INTERVAL_SEC}s (剩余 {remaining} 个)...")
