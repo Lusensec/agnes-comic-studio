@@ -9,9 +9,10 @@
 | 子 Skill | 核心能力 | 对应 Agnes 模型 | 触发场景 |
 |----------|---------|---------------|---------|
 | **agnes-flash-suite** | 基础能力（生图/生视频/对话） | 全系列 | 直接调用 Agnes API |
-| **script-writer** | 剧本 + 角色设定 + 分镜脚本 | `agnes-3.0-flash` | 故事概念 → 结构化剧本 |
-| **storyboard-gen** | 分镜图片 + 角色参考图 | `agnes-image-2.5-flash` | 剧本 → 逐镜头生图 |
-| **video-composer** | 分镜图 → 短视频 | `agnes-video-2.5-flash` | 图片 → 动态视频 |
+| **script-writer** | 剧本 + 角色设定 + 分镜脚本 + 模板预设 | `agnes-3.0-flash` | 故事概念 → 结构化剧本 |
+| **storyboard-gen** | 三视图/背景/道具/分镜 + URL 存储 | `agnes-image-2.5-flash` | 剧本 → 逐镜头生图 |
+| **video-composer** | 图生视频（reference）+ 429 重试 | `agnes-video-2.5-flash` | 图片 → 动态视频 |
+| **post-production** | TTS 配音 + 字幕 + BGM + 最终合成 | edge-tts + ffmpeg | 后期制作 |
 | **asset-manager** | 资产追踪、项目文件夹管理 | 无（本地） | 文件定位、修改、复用 |
 
 ## 资产目录结构
