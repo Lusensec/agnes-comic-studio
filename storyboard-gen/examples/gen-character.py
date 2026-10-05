@@ -80,7 +80,15 @@ def main():
     url = gen_image(prompt, size=img_size)
     out.write_bytes(urllib.request.urlopen(url).read())
     track_file(project, f"image_{mode}", str(out), f"{char_name} {mode}", f"style={style}")
+    
+    # Save URL to image-urls.json for I2I reference
+    urls_file = proj_dir / "scripts" / f"{project}-image-urls.json"
+    existing = json.loads(urls_file.read_text()) if urls_file.exists() else {}
+    existing[f"{mode}-{char_name}"] = url
+    urls_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+    
     print(f"✅ 已保存: {out.name}")
+    print(f"   URL 已存: {mode}-{char_name}")
 
 
 if __name__ == "__main__":
