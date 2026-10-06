@@ -74,10 +74,10 @@ def main():
     if not urls_file.exists():
         print("[ERROR] 未找到 image-urls.json")
         sys.exit(1)
-    urls = json.loads(urls_file.read_text())
+    urls = json.loads(urls_file.read_text(encoding="utf-8"))
 
     scripts = list((proj_dir / "scripts").glob(f"{project}-script.json"))
-    script = json.loads(scripts[0].read_text()) if scripts else {}
+    script = json.loads(scripts[0].read_text(encoding="utf-8")) if scripts else {}
     scenes = script.get("scenes", [])
 
     # Get three-view refs

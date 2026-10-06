@@ -55,7 +55,7 @@ def load_urls(project: str) -> dict:
     """Load all stored image URLs."""
     f = PROJECT_ROOT / project / "scripts" / f"{project}-image-urls.json"
     if f.exists():
-        return json.loads(f.read_text())
+        return json.loads(f.read_text(encoding="utf-8"))
     return {}
 
 
@@ -82,7 +82,7 @@ def main():
     if not scripts:
         print("[ERROR] 未找到剧本", file=sys.stderr)
         sys.exit(1)
-    script = json.loads(scripts[0].read_text())
+    script = json.loads(scripts[0].read_text(encoding="utf-8"))
     config = script.get("config", {})
     style = config.get("style", "动画")
     style_prefix = STYLE_PREFIX.get(style, "")
@@ -152,9 +152,9 @@ def main():
     # Save scene URLs
     if url_map:
         save_file = proj_dir / "scripts" / f"{project}-image-urls.json"
-        existing = json.loads(save_file.read_text()) if save_file.exists() else {}
+        existing = json.loads(save_file.read_text(encoding="utf-8")) if save_file.exists() else {}
         existing.update(url_map)
-        save_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+        save_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n📝 分镜 URL 已保存")
 
     print(f"\n✅ 分镜图完成 ({len(scenes)} 张)，每场景 {len(refs)} 张参考 I2I")

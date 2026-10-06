@@ -52,7 +52,7 @@ def main():
     if not scripts:
         print("[ERROR] 未找到剧本", file=sys.stderr)
         sys.exit(1)
-    script = json.loads(scripts[0].read_text())
+    script = json.loads(scripts[0].read_text(encoding="utf-8"))
     config = script.get("config", {})
     img_size = config.get("image_size", "1K")
     style = config.get("style", "动画")
@@ -83,9 +83,9 @@ def main():
     
     # Save URL to image-urls.json for I2I reference
     urls_file = proj_dir / "scripts" / f"{project}-image-urls.json"
-    existing = json.loads(urls_file.read_text()) if urls_file.exists() else {}
+    existing = json.loads(urls_file.read_text(encoding="utf-8")) if urls_file.exists() else {}
     existing[f"{mode}-{char_name}"] = url
-    urls_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+    urls_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
     
     print(f"✅ 已保存: {out.name}")
     print(f"   URL 已存: {mode}-{char_name}")

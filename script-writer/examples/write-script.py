@@ -45,7 +45,7 @@ SYSTEM_PROMPT = """你是专业漫剧编剧。根据用户的故事概念，输�
     }
   ]
 }
-场景数 3-8 个，每个场景 1-3 句台词。props 列出故事中出现的 2-5 个关键道具/物品。"""
+场景数 3-8 个。台词硬性约束：每个场景 1-2 句、每句不超过 15 个汉字——台词会被 TTS 配音，必须装进用户指定的"每场景时长"，超长句子会被截断或互相叠音，宁短勿长。props 列出故事中出现的 2-5 个关键道具/物品。"""
 
 
 def call_agnes(prompt: str, model: str = "agnes-3.0-flash") -> str:
@@ -125,7 +125,7 @@ def main():
     script["created_at"] = datetime.now(timezone.utc).isoformat()
 
     out = script_dir / f"{project}-script.json"
-    out.write_text(json.dumps(script, ensure_ascii=False, indent=2))
+    out.write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     track_file(project, "script", str(out), f"剧本: {concept[:50]}", f"风格={style},场景数={len(script.get('scenes',[]))}")
 
     n_chars = len(script.get("characters", []))

@@ -1,3 +1,9 @@
+---
+name: post-production
+description: |
+  后期制作子 Skill。TTS 配音、字幕生成（多句分窗）、BGM 叠加、最终视频合成（ffmpeg 场景对齐混音，Windows 路径安全）。
+  触发场景：配音、字幕、BGM、最终合成。
+
 # Post Production（后期制作）
 
 > TTS 配音、字幕生成、BGM 叠加、最终视频合成。

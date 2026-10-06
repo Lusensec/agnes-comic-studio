@@ -1,3 +1,9 @@
+---
+name: storyboard-gen
+description: |
+  分镜生成子 Skill。读取剧本 JSON，用 agnes-image-2.5-flash 生成全套视觉资产：角色三视图、纯背景、道具、分镜图，URL 存储。
+  触发场景：逐镜头分镜图生成；角色三视图/背景/道具图。
+
 # Storyboard Generator（分镜生成）
 
 > 读取剧本 JSON，生成全套视觉资产：角色三视图、纯背景、道具、分镜图。

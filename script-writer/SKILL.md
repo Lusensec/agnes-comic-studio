@@ -1,3 +1,9 @@
+---
+name: script-writer
+description: |
+  剧本生成子 Skill。用 agnes-3.0-flash 从故事概念生成结构化剧本 JSON（故事、角色设定、分镜脚本、config）。
+  触发场景：故事概念转结构化剧本；故事 → 剧本 JSON。
+
 # Script Writer（剧本生成）
 
 > 用 `agnes-3.0-flash` 从故事概念生成结构化剧本 JSON，包含角色设定、分镜脚本。

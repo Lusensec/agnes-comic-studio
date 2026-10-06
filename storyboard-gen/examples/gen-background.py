@@ -69,7 +69,7 @@ def main():
     if not scripts:
         print("[ERROR] 未找到剧本", file=sys.stderr)
         sys.exit(1)
-    script = json.loads(scripts[0].read_text())
+    script = json.loads(scripts[0].read_text(encoding="utf-8"))
     config = script.get("config", {})
     style = config.get("style", "动画")
     img_size = config.get("image_size", "1K")
@@ -111,9 +111,9 @@ def main():
         urls_file = proj_dir / "scripts" / f"{project}-image-urls.json"
         existing = {}
         if urls_file.exists():
-            existing = json.loads(urls_file.read_text())
+            existing = json.loads(urls_file.read_text(encoding="utf-8"))
         existing.update(url_map)
-        urls_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+        urls_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n📝 URL 已追加到 {urls_file.name}")
 
     print(f"\n✅ 背景图完成")

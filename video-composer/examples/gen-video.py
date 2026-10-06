@@ -18,6 +18,7 @@ Usage:
 import json
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def load_image_urls(project: str) -> dict:
     """Load stored image URLs from gen-storyboard output."""
     urls_file = PROJECT_ROOT / project / "scripts" / f"{project}-image-urls.json"
     if urls_file.exists():
-        return json.loads(urls_file.read_text())
+        return json.loads(urls_file.read_text(encoding="utf-8"))
     return {}
 
 
@@ -98,15 +99,23 @@ def poll_video(video_id: str, timeout=600, interval=30) -> str:
     raise TimeoutError(f"Video {video_id} not ready after {timeout}s")
 
 
-def retry_on_429(func, max_retries=3):
-    """Retry a function call on 429 with exponential backoff."""
+def retry_api(func, max_retries=4):
+    """Retry a submit on 429 (rate limit) and 503 (video_queue_full) with backoff.
+
+    The Agnes video queue is shared and fills quickly at peak hours; waiting
+    a few in-script retries (65s, 130s, 195s) usually beats the queue surge.
+    If all retries fail the HTTPError is re-raised and the caller decides
+    (main() fast-fails with exit code 3 so an outer runner can re-run later —
+    completed scenes are skipped, so re-running is idempotent).
+    """
     for attempt in range(max_retries):
         try:
             return func()
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries - 1:
+            if e.code in (429, 503) and attempt < max_retries - 1:
                 wait = 65 * (attempt + 1)
-                print(f"     ⏱  429 限流，等待 {wait}s 后重试 ({attempt+1}/{max_retries})...")
+                reason = "429 限流" if e.code == 429 else "503 视频队列已满"
+                print(f"     ⏱  {reason}，等待 {wait}s 后重试 ({attempt+1}/{max_retries})...")
                 time.sleep(wait)
             else:
                 raise
@@ -131,7 +140,7 @@ def main():
     img_dir = proj_dir / "images"
 
     scripts = list((proj_dir / "scripts").glob(f"{project}-script.json"))
-    script = json.loads(scripts[0].read_text()) if scripts else {}
+    script = json.loads(scripts[0].read_text(encoding="utf-8")) if scripts else {}
     scenes = script.get("scenes", [])
     config = script.get("config", {})
     if duration is None:
@@ -186,7 +195,7 @@ def main():
 
         print(f"  🎥 [{i+1}/{total}] scene-{sid}: {scene.get('title', '')[:30]}...")
         try:
-            video_id = retry_on_429(
+            video_id = retry_api(
                 lambda: submit_video(prompt, refs, duration, aspect_ratio)
             )
             print(f"     submitted: {video_id} ({len(refs)} refs)")
@@ -195,6 +204,12 @@ def main():
             out_file.write_bytes(mp4_data)
             track_file(project, "video", str(out_file), f"视频 scene-{sid}", f"duration={duration}s")
             print(f"     ✅ {out_file.name} ({len(mp4_data)//1024}KB)")
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503):
+                print(f"     ❌ scene-{sid} 提交失败 (HTTP {e.code})，重试 {4} 次后仍被限流/队列满")
+                print("⚠️  Agnes 视频队列已满，本轮停止。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
+                sys.exit(3)
+            print(f"     ❌ 提交失败 (HTTP {e.code}): {e.reason}")
         except Exception as e:
             print(f"     ❌ 失败: {e}")
 

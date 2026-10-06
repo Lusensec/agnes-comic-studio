@@ -25,7 +25,7 @@ def main():
         print(f"[ERROR] 找不到 {project}-script.json，请先运行 write-script.py")
         sys.exit(1)
 
-    script = json.loads(script_file[0].read_text())
+    script = json.loads(script_file[0].read_text(encoding="utf-8"))
 
     if sys.argv[2] == "--scene":
         scene_id = int(sys.argv[3])
@@ -51,7 +51,7 @@ def main():
                   ", ".join(c.get("name", "?") for c in script.get("characters", [])))
             sys.exit(1)
 
-    script_file[0].write_text(json.dumps(script, ensure_ascii=False, indent=2))
+    script_file[0].write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n保存至: {script_file[0]}")
     print("下一步：")
     print(f"  [1] 重新生成分镜图 → python storyboard-gen/examples/gen-storyboard.py \"{project}\"")

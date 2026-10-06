@@ -1,3 +1,9 @@
+---
+name: agnes-flash-suite
+description: |
+  基础能力层子 Skill。直接封装 Agnes AI API 调用（生图/生视频/对话），供其他子 Skill 或用户独立使用。
+  触发场景：直接调用 Agnes API、文生图、文生视频、对话。
+
 # Agnes Flash Suite（基础能力层）
 
 > 直接封装 Agnes AI API 调用，供其他子 Skill 或用户独立使用。

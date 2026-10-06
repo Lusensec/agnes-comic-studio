@@ -76,7 +76,7 @@ def main():
     if not scripts:
         print("[ERROR] 未找到剧本", file=sys.stderr)
         sys.exit(1)
-    script = json.loads(scripts[0].read_text())
+    script = json.loads(scripts[0].read_text(encoding="utf-8"))
 
     # Build character voice map
     voice_map = {}

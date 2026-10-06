@@ -1,3 +1,9 @@
+---
+name: asset-manager
+description: |
+  资产管理子 Skill。管理项目文件夹结构，用 SQLite 数据库追踪所有资产（script/image/video/reference），支持定位、修改、复用。
+  触发场景：查看/修改/复用资产；项目文件夹初始化；资产索引。
+
 # Asset Manager（资产管理）
 
 > 管理项目文件夹结构，用 SQLite 数据库追踪所有资产，支持定位、修改、复用。

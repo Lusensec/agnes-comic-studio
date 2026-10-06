@@ -45,7 +45,7 @@ def main():
     if not scripts:
         print("[ERROR] 未找到剧本", file=sys.stderr)
         sys.exit(1)
-    script = json.loads(scripts[0].read_text())
+    script = json.loads(scripts[0].read_text(encoding="utf-8"))
     config = script.get("config", {})
     duration = int(config.get("video_duration", "5"))
 
@@ -65,28 +65,30 @@ def main():
         else:
             dialogs = []
 
+        # Collect valid lines for this scene first, then split the scene
+        # window evenly among them (2+ lines in one scene get their own
+        # time slots instead of overlapping cues).
+        entries = []
         for dialog in dialogs:
             # Handle both formats: string or dict
             if isinstance(dialog, str):
-                raw = dialog
-                char = ""
+                raw, char = dialog, ""
             elif isinstance(dialog, dict):
-                raw = dialog.get("line", "")
-                char = dialog.get("character", "")
+                raw, char = dialog.get("line", ""), dialog.get("character", "")
             else:
                 continue
             text = clean_text(raw)
             if not text:
                 continue
-            # Display: "角色：台词" or just "台词"
             display = f"{char}：{text}" if char else text
+            entries.append(display)
 
-            # Center subtitle within scene's time window
-            scene_id = scene.get("scene_id", 1)
-            scene_start = (scene_id - 1) * duration
-            # Each dialogue gets 60% of scene time, centered
-            offset = scene_start + duration * 0.2
-            dur = min(duration * 0.6, 4.0)
+        scene_id = scene.get("scene_id", 1)
+        scene_start = (scene_id - 1) * duration
+        slot = duration / max(1, len(entries))
+        for idx, display in enumerate(entries):
+            offset = scene_start + idx * slot + slot * 0.1
+            dur = min(slot * 0.8, 4.0)
             lines.append(f"{len(lines)+1}\n{fmt_time(offset)} --> {fmt_time(offset + dur)}\n{display}\n")
 
     total_dur = total_scenes * duration

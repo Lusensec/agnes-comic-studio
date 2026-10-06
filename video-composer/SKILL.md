@@ -1,3 +1,9 @@
+---
+name: video-composer
+description: |
+  视频合成子 Skill。以分镜图片为参考，用 agnes-video-2.5-flash 逐场景生成短视频，可选拼接，自动处理 429 限流与 503 视频队列满（退避重试 + 快速失败，可幂等续跑）。
+  触发场景：图片转动态短视频；图生视频；视频拼接。
+
 # Video Composer（视频合成）
 
 > 把分镜图片作为参考，调用 `agnes-video-2.5-flash` 逐场景生成短视频，可选拼接。

@@ -6,16 +6,17 @@
 
 ## 特性
 
-- 📝 **AI 剧本生成** — 输入故事概念，自动输出结构化剧本（角色 + 场景 + 台词 + 道具）
+- 📝 **AI 剧本生成** — 输入故事概念，自动输出结构化剧本（角色 + 场景 + 台词 + 道具；台词长度受场景时长约束）
 - 🎨 **完整视觉资产** — 角色三视图、多表情、纯背景、道具参考、分镜图（多角色一致性 I2I）
-- 🎬 **短视频合成** — 图生视频（reference 模式）或文生视频，自动速率控制 + 429 重试
-- 🎙 **TTS 配音** — edge-tts 免费中文配音，自动按角色分配音色
-- 💬 **字幕生成** — 自动 SRT 时间轴
-- 🔊 **BGM + 合成** — ffmpeg 一步合成最终成片
+- 🎬 **短视频合成** — 图生视频（reference 模式）或文生视频，自动速率控制 + 429/503（队列满）退避重试
+- 🎙 **TTS 配音** — edge-tts 免费中文配音，自动按角色分配音色；合成时按场景起点对齐，台词不互相叠音
+- 💬 **字幕生成** — 自动 SRT 时间轴（同场景多句自动分窗）
+- 🔊 **BGM + 合成** — ffmpeg 合成最终成片（Windows 路径安全）
 - 📦 **资产追踪** — SQLite 数据库统一管理，支持搜索/复用
 - 📋 **模板预设** — 抖音/B站/小红书/微博 一键配置
 - 🔀 **模块化** — 6 个子 Skill，可单独调用
-- ⚡ **速率限制防范** — 自动 sleep + 429 指数退避
+- ⚡ **速率限制防范** — 自动 sleep + 429/503 退避，队列满时快速失败（exit 3），重跑自动跳过已完成片段（幂等）
+- 🪟 **跨平台** — Windows（GBK 控制台自动切 UTF-8 输出）/ Linux / macOS
 
 ## 前置条件
 
@@ -23,8 +24,8 @@
 |------|------|
 | Python 3.9+ | 仅用标准库 + `edge-tts`（TTS 需要） |
 | Agnes AI API Key | 免费注册 [platform.agnes-ai.cn](https://platform.agnes-ai.cn) |
-| ffmpeg（可选） | 视频拼接/合成需要：`apt install ffmpeg` |
-| edge-tts（可选） | TTS 配音：`pip install -i https://mirrors.aliyun.com/pypi/simple/ edge-tts` |
+| ffmpeg（可选） | 视频拼接/合成需要：Windows `winget install Gyan.FFmpeg` / macOS `brew install ffmpeg` / Linux `apt install ffmpeg` |
+| edge-tts（可选） | TTS 配音：`pip install edge-tts`（国内可走阿里云镜像） |
 
 ## 快速开始
 
@@ -35,11 +36,15 @@ cp .env.example .env
 # 编辑 .env，填入你的 AGNESAI_API_KEY
 ```
 
+`.env` 放在**套件根目录**即可：所有子技能的示例脚本会自动向上查找（含 `<套件根>/.env`、`<子技能>/.env`、当前目录 `./.env`），也支持直接用环境变量 `AGNESAI_API_KEY`。找不到 `.env` 不会崩溃，只是 `API_KEY` 为空（各脚本会提示）。
+
 可选环境变量（写入 `.env`）：
 ```
 AGNESAI_API_KEY=sk-xxx
 COMIC_STUDIO_ROOT=/path/to/your/projects   # 自定义项目根目录（默认 ~/comic-studio/projects）
 ```
+
+> 💡 **Windows 注意**：中文 Windows 默认 GBK 控制台，脚本已内置 stdout/stderr 自动切 UTF-8，直接 `python xxx.py` 即可，无需手动 `chcp 65001`；生成的 JSON/SRT 一律 UTF-8。
 
 ### 2. 初始化项目
 
@@ -250,7 +255,7 @@ agnes-comic-studio/
 | `agnes-image-2.5-flash` 1K | 20次/分 | 3s |
 | `agnes-image-2.5-flash` 2K | 10次/分 | 7s |
 | `agnes-image-2.5-flash` 3K/4K | 1次/分 | 60s |
-| `agnes-video-2.5-flash` | **1次/分** | 65s + 429 指数退避 |
+| `agnes-video-2.5-flash` | **1次/分** | 65s + 429/503 退避（共享队列高峰会满，脚本快速失败后重跑即可续接） |
 
 视频约束：size 固定 720P，时长 4-12s，图片参考最多 5 张。
 

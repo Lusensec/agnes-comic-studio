@@ -1,3 +1,21 @@
+---
+name: agnes-comic-studio
+description: |
+  Agnes Comic Studio 漫剧/短视频创作套件（基于 Agnes AI Flash 系列）。统一入口，子 Skill 可独立使用。
+  将「故事概念 → 剧本 → 分镜图 → 短视频」完整流程拆解为可独立调用的子 Skill，每步结束后询问用户是否继续或修改。所有产出资产统一存储在项目文件夹下，用 SQLite 数据库追踪定位。
+
+  子 Skill 列表：
+  - script-writer（剧本 + 角色设定 + 分镜脚本 + 模板预设；agnes-3.0-flash）
+  - storyboard-gen（角色三视图/背景/道具/分镜图 + URL 存储；agnes-image-2.5-flash）
+  - video-composer（图生视频 + 限流/队列满自动重试；agnes-video-2.5-flash）
+  - post-production（TTS 配音 + 字幕 + BGM + 最终合成（场景对齐配音）；edge-tts + ffmpeg）
+  - asset-manager（资产追踪 / 项目文件夹管理；本地）
+  - agnes-flash-suite（基础能力：生图/生视频/对话；全系列）
+
+  跨平台支持：Windows/Linux/macOS；中文 GBK 控制台自动切 UTF-8 输出；.env 从套件根目录向上自动发现。
+
+  触发场景：漫剧创作、短视频制作、故事→剧本→分镜图→视频、分镜生图、图生视频、TTS 字幕合成、资产追踪。
+
 # Agnes Comic Studio
 
 > 基于 Agnes AI Flash 系列的漫剧/短视频创作套件。统一入口，子 Skill 可独立使用。
@@ -11,8 +29,8 @@
 | **agnes-flash-suite** | 基础能力（生图/生视频/对话） | 全系列 | 直接调用 Agnes API |
 | **script-writer** | 剧本 + 角色设定 + 分镜脚本 + 模板预设 | `agnes-3.0-flash` | 故事概念 → 结构化剧本 |
 | **storyboard-gen** | 三视图/背景/道具/分镜 + URL 存储 | `agnes-image-2.5-flash` | 剧本 → 逐镜头生图 |
-| **video-composer** | 图生视频（reference）+ 429 重试 | `agnes-video-2.5-flash` | 图片 → 动态视频 |
-| **post-production** | TTS 配音 + 字幕 + BGM + 最终合成 | edge-tts + ffmpeg | 后期制作 |
+| **video-composer** | 图生视频（reference）+ 429/503 退避重试（队列满快速失败，重跑幂等） | `agnes-video-2.5-flash` | 图片 → 动态视频 |
+| **post-production** | TTS 配音（场景对齐）+ 字幕 + BGM + 最终合成 | edge-tts + ffmpeg | 后期制作 |
 | **asset-manager** | 资产追踪、项目文件夹管理 | 无（本地） | 文件定位、修改、复用 |
 
 ## 资产目录结构
@@ -99,6 +117,8 @@ Agent 在用户给出故事概念后，应主动询问：
 
 每个子 Skill 的 `examples/` 目录包含可直接运行的脚本，**支持命令行参数**：
 
+> 先配置 `AGNESAI_API_KEY`：复制 `.env.example` 为**套件根目录**下的 `.env`（脚本自动向上发现），或设置环境变量。Windows 中文控制台无需额外处理，脚本已内置 UTF-8 输出。
+
 ```bash
 # 初始化项目
 python asset-manager/examples/init-project.py "我的漫剧"
@@ -140,7 +160,7 @@ python video-composer/examples/gen-video.py "我的漫剧"
 | `agnes-image-2.5-flash` 1K | 20次/分 | 3s |
 | `agnes-image-2.5-flash` 2K | 10次/分 | 7s |
 | `agnes-image-2.5-flash` 3K/4K | 1次/分 | 60s |
-| `agnes-video-2.5-flash` | **1次/分** | 65s |
+| `agnes-video-2.5-flash` | **1次/分** | 65s + 429/503（video_queue_full）退避重试；队列满时脚本 exit 3 快速失败，稍后重跑自动跳过已完成片段 |
 
 视频模型额外约束：
 - size 固定 720P（不可选）
