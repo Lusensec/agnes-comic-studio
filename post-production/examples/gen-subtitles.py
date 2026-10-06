@@ -55,14 +55,26 @@ def main():
     # Timing: each scene = duration seconds, subtitles centered in that window
     lines = []
     for scene in scenes:
-        for dialog in scene.get("dialogue", []):
+        # Handle dialogue field: could be list, string, or missing
+        raw_dialogue = scene.get("dialogue", [])
+        if isinstance(raw_dialogue, str):
+            # It's a single string - treat as one line
+            dialogs = [raw_dialogue] if raw_dialogue.strip() else []
+        elif isinstance(raw_dialogue, list):
+            dialogs = raw_dialogue
+        else:
+            dialogs = []
+
+        for dialog in dialogs:
             # Handle both formats: string or dict
             if isinstance(dialog, str):
                 raw = dialog
                 char = ""
-            else:
+            elif isinstance(dialog, dict):
                 raw = dialog.get("line", "")
                 char = dialog.get("character", "")
+            else:
+                continue
             text = clean_text(raw)
             if not text:
                 continue
