@@ -312,6 +312,12 @@ def main():
                 print("⚠️  Agnes 视频队列已满，本轮停止。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
                 sys.exit(3)
             print(f"     ❌ 提交失败 (HTTP {e.code}): {e.reason}")
+        except OSError as e:
+            # network hiccups (read timeout / connection reset): fail fast so the
+            # caller's retry loop restarts quickly instead of sleeping 65s per scene
+            print(f"     ⏱  网络瞬时故障（{str(e)[:60] or '连接中断'}），本轮停止")
+            print("⚠️  网络不稳或队列繁忙。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
+            sys.exit(3)
         except Exception as e:
             print(f"     ❌ 失败: {e}")
 
