@@ -26,6 +26,23 @@ description: |
 4. 提交后轮询 `/agnesapi` 直到 `status=completed`
 5. （可选）用 ffmpeg 拼接所有片段
 
+## 音频参考（对白嘴型同步，可选）
+
+Agnes 视频 API 的 reference 模式支持 `audios` 参数（最多 3 段，URL 必须**公网可达**）。
+`gen-video.py` 会自动启用：
+
+1. `.env` 里配置 `AGNES_TTS_GITHUB_REPO=owner/repo`（**公开**仓库，Agnes 服务器要能匿名拉取）
+2. 先跑 `gen-tts.py` 生成 `videos/audio/line-*.mp3`
+3. 再跑 `gen-video.py`：脚本把 TTS 文件幂等上传到该仓库，并把每场景的台词
+   （`line-<场景>-<句>.mp3`，≤3 段）作为音频参考提交，prompt 自动追加
+   “说话、嘴部随参考音频自然开合”。
+
+注意：音频参考让模型**按台词节奏**生成嘴部动作（大致同步），不是逐音素级
+对口型；要逐音素级需另接 Wav2Lip/MuseTalk 类后处理。未配置仓库时自动退回
+纯图片参考，不影响流程。
+
+推荐流程顺序：**写剧本 → 分镜图 → 配音（TTS）→ 视频（带音频参考）→ 字幕 → 合成**。
+
 ## 调用方式
 
 ```python

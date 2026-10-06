@@ -7,7 +7,7 @@ description: |
   子 Skill 列表：
   - script-writer（剧本 + 角色设定 + 分镜脚本 + 模板预设；agnes-3.0-flash）
   - storyboard-gen（角色三视图/背景/道具/分镜图 + URL 存储；agnes-image-2.5-flash）
-  - video-composer（图生视频 + 限流/队列满自动重试；agnes-video-2.5-flash）
+  - video-composer（图生视频 + 限流/队列满自动重试 + 可选 TTS 音频参考嘴型同步；agnes-video-2.5-flash）
   - post-production（TTS 配音 + 字幕 + BGM + 最终合成（场景对齐配音）；edge-tts + ffmpeg）
   - asset-manager（资产追踪 / 项目文件夹管理；本地）
   - agnes-flash-suite（基础能力：生图/生视频/对话；全系列）
@@ -29,7 +29,7 @@ description: |
 | **agnes-flash-suite** | 基础能力（生图/生视频/对话） | 全系列 | 直接调用 Agnes API |
 | **script-writer** | 剧本 + 角色设定 + 分镜脚本 + 模板预设 | `agnes-3.0-flash` | 故事概念 → 结构化剧本 |
 | **storyboard-gen** | 三视图/背景/道具/分镜 + URL 存储 | `agnes-image-2.5-flash` | 剧本 → 逐镜头生图 |
-| **video-composer** | 图生视频（reference）+ 429/503 退避重试（队列满快速失败，重跑幂等） | `agnes-video-2.5-flash` | 图片 → 动态视频 |
+| **video-composer** | 图生视频（reference）+ 429/503 退避重试 + 可选 TTS 音频参考（对白嘴型同步） | `agnes-video-2.5-flash` | 图片 → 动态视频 |
 | **post-production** | TTS 配音（场景对齐）+ 字幕 + BGM + 最终合成 | edge-tts + ffmpeg | 后期制作 |
 | **asset-manager** | 资产追踪、项目文件夹管理 | 无（本地） | 文件定位、修改、复用 |
 
@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS assets (
     ↓  询问用户：继续 / 修改剧本 / 调整角色
 [Step 2: storyboard-gen] 逐镜头生成图片
     ↓  询问用户：继续 / 重新生成某镜头 / 调整风格
-[Step 3: video-composer] 图片 → 短视频（可选）
+[Step 2.5: post-production/gen-tts.py] 对白配音（推荐先出 TTS，视频才能做嘴型同步）
+     ↓
+[Step 3: video-composer] 图片 → 短视频（可选；配置 AGNES_TTS_GITHUB_REPO 后自动带音频参考）
     ↓  询问用户：继续 / 调整时长 / 跳过视频
 输出完整项目
 ```
@@ -166,7 +168,7 @@ python video-composer/examples/gen-video.py "我的漫剧"
 - size 固定 720P（不可选）
 - 时长 4-12s（超出自动裁剪）
 - 图片参考最多 5 张
-- 音频参考最多 3 段
+- 音频参考最多 3 段（URL 需公网可达；`.env` 配置 `AGNES_TTS_GITHUB_REPO` 后 gen-video.py 自动上传 TTS 并携带音频参考，见 video-composer/SKILL.md）
 - 不支持视频参考
 
 ## 使用场景

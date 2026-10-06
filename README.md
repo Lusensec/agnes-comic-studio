@@ -121,6 +121,12 @@ python video-composer/examples/gen-video.py "项目名" --duration 8
 python video-composer/examples/merge-videos.py "项目名"
 ```
 
+> **可选：对白嘴型同步** — 若希望人物说话时嘴部随台词动起来：先把 Step 7 的 `gen-tts.py`
+> 提前到本步骤之前运行（生成 `videos/audio/line-*.mp3`），并在 `.env` 配置
+> `AGNES_TTS_GITHUB_REPO=owner/repo`（**公开** GitHub 仓库，用于托管 TTS 文件供
+> Agnes 服务器拉取）。之后 `gen-video.py` 会自动上传 TTS 并以音频参考模式生成视频。
+> 未配置则自动退回纯图片参考。详见 `video-composer/SKILL.md`「音频参考」一节。
+
 ### 7. TTS 配音 + 字幕 + 合成（Step 4）
 
 ```bash

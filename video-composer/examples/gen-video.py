@@ -4,6 +4,12 @@
 Uses image reference mode when URLs are available (from gen-storyboard.py).
 Falls back to text mode if no URLs stored.
 
+Audio reference (optional): if AGNES_TTS_GITHUB_REPO is configured in .env,
+local TTS lines (videos/audio/line-*.mp3 from gen-tts.py) are uploaded to
+that PUBLIC GitHub repo and passed as `audios` reference — the model then
+animates speaking mouths roughly in sync with the line audio. Without it,
+videos are generated image-only (mouths not synced to dialogue).
+
 Rate limit (agnes-video-2.5-flash):
   - 1 次/分钟（每次提交间隔 >= 65s）
   - 图片参考最多 5 张
@@ -16,6 +22,9 @@ Usage:
     python gen-video.py "项目名" [--scene N] [--duration 5]
 """
 import json
+import os
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -50,11 +59,83 @@ def load_image_urls(project: str) -> dict:
     return {}
 
 
+def _git(args: list, cwd=None, timeout=180) -> subprocess.CompletedProcess:
+    """Run git, honoring optional AGNES_GIT_PROXY / AGNES_GIT_SSL env vars."""
+    cmd = ["git"]
+    proxy = os.environ.get("AGNES_GIT_PROXY", "").strip()
+    if proxy:
+        cmd += ["-c", f"http.proxy={proxy}", "-c", f"https.proxy={proxy}"]
+    ssl_backend = os.environ.get("AGNES_GIT_SSL", "").strip()
+    if ssl_backend:
+        cmd += ["-c", f"http.sslBackend={ssl_backend}"]
+    cmd += args
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def upload_tts_audio(project: str, audio_files: list) -> dict:
+    """Upload TTS mp3s to the configured public GitHub repo, return {name: raw_url}.
+
+    Config (.env / env vars):
+      AGNES_TTS_GITHUB_REPO  owner/repo  (public repo Agnes servers can fetch)
+      AGNES_TTS_REPO_BRANCH  default "main"
+      AGNES_GIT_PROXY        optional http proxy for git operations
+      AGNES_GIT_SSL          optional git ssl backend (e.g. "openssl")
+
+    Without AGNES_TTS_GITHUB_REPO this is a no-op (image-only references).
+    On any failure it prints a warning and returns {} so video generation
+    still proceeds with image references.
+    """
+    repo = os.environ.get("AGNES_TTS_GITHUB_REPO", "").strip()
+    if not repo or "/" not in repo:
+        return {}
+    branch = os.environ.get("AGNES_TTS_REPO_BRANCH", "main").strip() or "main"
+    cache = PROJECT_ROOT / "_tts-repo"
+
+    if cache.exists():
+        _git(["pull", "-q"], cwd=cache)  # best effort
+    else:
+        r = _git(["clone", "--depth", "1", "-b", branch,
+                  f"https://github.com/{repo}.git", str(cache)])
+        if r.returncode != 0:
+            print(f"   ⚠️  TTS 仓库克隆失败（{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else '未知错误'}），本次仅用图片参考")
+            return {}
+
+    repo_proj_dir = cache / project
+    repo_proj_dir.mkdir(parents=True, exist_ok=True)
+    changed = False
+    for a in audio_files:
+        dest = repo_proj_dir / a.name
+        if not dest.exists() or dest.stat().st_size != a.stat().st_size:
+            shutil.copy2(a, dest)
+            changed = True
+    if changed:
+        _git(["add", "-A"], cwd=cache)
+        r = _git(["diff", "--cached", "--quiet"], cwd=cache)
+        if r.returncode != 0:  # staged changes exist
+            _git(["-c", "user.name=comic-studio", "-c", "user.email=comic-studio@local",
+                  "commit", "-q", "-m", f"{project}: update TTS audio references"], cwd=cache)
+            p = _git(["push", "-q", "origin", branch], cwd=cache)
+            if p.returncode != 0:
+                print(f"   ⚠️  TTS 推送失败（{p.stderr.strip().splitlines()[-1] if p.stderr.strip() else '未知错误'}），本次仅用图片参考")
+                return {}
+        print(f"   📤  已上传 {len(audio_files)} 段 TTS → github.com/{repo}/{project}/")
+
+    base = f"https://raw.githubusercontent.com/{repo}/{branch}/{project}/"
+    return {a.name: base + a.name for a in audio_files}
+
+
 def submit_video(prompt: str, image_refs: list = None,
-                 seconds: str = "5", aspect_ratio: str = "16:9") -> str:
-    """Submit video task. Uses reference mode if image_refs provided."""
-    # Validate: max 5 image refs
+                 seconds: str = "5", aspect_ratio: str = "16:9",
+                 audios: list = None) -> str:
+    """Submit video task. Uses reference mode if image_refs/audios provided.
+
+    audios: up to 3 public URLs (e.g. TTS lines) passed as `audios` reference;
+    reference them in the prompt with <Audio 1>, <Audio 2>, ...
+    """
+    # Validate: max 5 image refs, max 3 audio refs
     refs = (image_refs or [])[:5]
+    auds = (audios or [])[:3]
 
     body = {
         "model": "agnes-video-2.5-flash",
@@ -64,9 +145,12 @@ def submit_video(prompt: str, image_refs: list = None,
         "aspect_ratio": aspect_ratio,
     }
 
-    if refs:
+    if refs or auds:
         body["mode"] = "reference"
-        body["images"] = refs
+        if refs:
+            body["images"] = refs
+        if auds:
+            body["audios"] = auds
     else:
         body["mode"] = "text"
 
@@ -152,6 +236,16 @@ def main():
     has_urls = len(image_urls) > 0
     mode_label = "reference (图生视频)" if has_urls else "text (文生视频)"
 
+    # TTS audio references: upload local TTS lines (if AGNES_TTS_GITHUB_REPO
+    # is configured) and let the model generate speaking mouths in sync with them
+    audio_dir = video_dir / "audio"
+    tts_audio_files = sorted(audio_dir.glob("line-*.mp3"))
+    tts_urls = upload_tts_audio(project, tts_audio_files) if tts_audio_files else {}
+    if tts_audio_files and not tts_urls:
+        mode_label += " + 配音(未上传，仅图片参考)"
+    elif tts_urls:
+        mode_label += f" + {len(tts_urls)} 段配音参考"
+
     if scene_filter:
         scenes = [s for s in scenes if s.get("scene_id") == scene_filter]
     if not scenes:
@@ -193,12 +287,20 @@ def main():
                       "赛博朋克": "cyberpunk", "二次元": "2D anime"}.get(style, "anime")
         prompt = f"{style_word} style, smooth animation. {desc_en}. {desc_zh[:60]}"
 
+        # Per-scene audio refs (line-<sid>-1.mp3 .. line-<sid>-3.mp3, max 3)
+        scene_audios = [tts_urls[f"line-{sid}-{n}.mp3"]
+                        for n in range(1, 4) if f"line-{sid}-{n}.mp3" in tts_urls]
+        if scene_audios:
+            markers = " ".join(f"<Audio {k+1}>" for k in range(len(scene_audios)))
+            prompt += (f" The character is speaking; the mouth moves naturally, "
+                       f"in sync with the reference audio {markers}.")
+
         print(f"  🎥 [{i+1}/{total}] scene-{sid}: {scene.get('title', '')[:30]}...")
         try:
             video_id = retry_api(
-                lambda: submit_video(prompt, refs, duration, aspect_ratio)
+                lambda: submit_video(prompt, refs, duration, aspect_ratio, scene_audios)
             )
-            print(f"     submitted: {video_id} ({len(refs)} refs)")
+            print(f"     submitted: {video_id} ({len(refs)} refs, {len(scene_audios)} audio)")
             video_url = poll_video(video_id)
             mp4_data = urllib.request.urlopen(video_url).read()
             out_file.write_bytes(mp4_data)
