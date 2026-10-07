@@ -162,7 +162,7 @@ python video-composer/examples/gen-video.py "我的漫剧"
 | `agnes-image-2.5-flash` 1K | 20次/分 | 3s |
 | `agnes-image-2.5-flash` 2K | 10次/分 | 7s |
 | `agnes-image-2.5-flash` 3K/4K | 1次/分 | 60s |
-| `agnes-video-2.5-flash` | **1次/分** | 65s + 429/503（video_queue_full）退避重试；队列满时脚本 exit 3 快速失败，稍后重跑自动跳过已完成片段 |
+| `agnes-video-2.5-flash` | **1次/分/key**（多 key 可并行） | 65s + 429/503（video_queue_full）退避重试；队列满时脚本 exit 3 快速失败，稍后重跑自动跳过已完成片段；`.env` 配置 `AGNESAI_API_KEYS=key1,key2,...` 后按 key 数开并行 worker（详见 video-composer/SKILL.md） |
 
 视频模型额外约束：
 - size 固定 720P（不可选）

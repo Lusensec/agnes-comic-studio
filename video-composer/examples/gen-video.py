@@ -10,8 +10,14 @@ that PUBLIC GitHub repo and passed as `audios` reference — the model then
 animates speaking mouths roughly in sync with the line audio. Without it,
 videos are generated image-only (mouths not synced to dialogue).
 
+Multi-key parallel (optional): set AGNESAI_API_KEYS=key1,key2,... in .env to
+generate clips in parallel — one worker thread per key, each keeping its own
+65s submit rhythm. Without it, generation is serial on AGNESAI_API_KEY.
+Note: the server-side video queue is global; extra keys speed up the serial
+65s chain but cannot exceed the queue's own concurrency.
+
 Rate limit (agnes-video-2.5-flash):
-  - 1 次/分钟（每次提交间隔 >= 65s）
+  - 1 次/分钟（每次提交间隔 >= 65s，按 key 独立计算）
   - 图片参考最多 5 张
   - 音频参考最多 3 段
   - 不支持视频参考
@@ -26,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -60,17 +67,27 @@ def load_image_urls(project: str) -> dict:
 
 
 def _git(args: list, cwd=None, timeout=180) -> subprocess.CompletedProcess:
-    """Run git, honoring optional AGNES_GIT_PROXY / AGNES_GIT_SSL env vars."""
-    cmd = ["git"]
+    """Run git: try the direct route first (explicitly clearing any stale
+    system/registry proxy, which may point at a dead proxy), then fall back
+    to the optional AGNES_GIT_PROXY / AGNES_GIT_SSL settings."""
+    plain = subprocess.run(["git", "-c", "http.proxy=", "-c", "https.proxy="] + args,
+                           cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    if plain.returncode == 0:
+        return plain
     proxy = os.environ.get("AGNES_GIT_PROXY", "").strip()
-    if proxy:
-        cmd += ["-c", f"http.proxy={proxy}", "-c", f"https.proxy={proxy}"]
     ssl_backend = os.environ.get("AGNES_GIT_SSL", "").strip()
-    if ssl_backend:
-        cmd += ["-c", f"http.sslBackend={ssl_backend}"]
-    cmd += args
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                          timeout=timeout)
+    if proxy or ssl_backend:
+        cmd = ["git"]
+        if proxy:
+            cmd += ["-c", f"http.proxy={proxy}", "-c", f"https.proxy={proxy}"]
+        if ssl_backend:
+            cmd += ["-c", f"http.sslBackend={ssl_backend}"]
+        cmd += args
+        fallback = subprocess.run(cmd, cwd=cwd, capture_output=True,
+                                  text=True, timeout=timeout)
+        if fallback.returncode == 0:
+            return fallback
+    return plain
 
 
 def upload_tts_audio(project: str, audio_files: list) -> dict:
@@ -127,12 +144,14 @@ def upload_tts_audio(project: str, audio_files: list) -> dict:
 
 def submit_video(prompt: str, image_refs: list = None,
                  seconds: str = "5", aspect_ratio: str = "16:9",
-                 audios: list = None) -> str:
+                 audios: list = None, api_key: str = None) -> str:
     """Submit video task. Uses reference mode if image_refs/audios provided.
 
     audios: up to 3 public URLs (e.g. TTS lines) passed as `audios` reference;
     reference them in the prompt with <Audio 1>, <Audio 2>, ...
+    api_key: override the default AGNESAI_API_KEY (multi-key parallel mode).
     """
+    key = api_key or API_KEY
     # Validate: max 5 image refs, max 3 audio refs
     refs = (image_refs or [])[:5]
     auds = (audios or [])[:3]
@@ -157,18 +176,19 @@ def submit_video(prompt: str, image_refs: list = None,
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         BASE_VIDEO, data=data,
-        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST"
     )
     resp = urllib.request.urlopen(req, timeout=120).read()
     return json.loads(resp)["video_id"]
 
 
-def poll_video(video_id: str, timeout=600, interval=30) -> str:
+def poll_video(video_id: str, timeout=600, interval=30, api_key: str = None) -> str:
+    key = api_key or API_KEY
     elapsed = 0
     while elapsed < timeout:
         url = f"{BASE_POLL}?video_id={video_id}&model_name=agnes-video-2.5-flash"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {API_KEY}"})
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
         resp = urllib.request.urlopen(req, timeout=60).read()
         result = json.loads(resp)
         status = result.get("status", "")
@@ -203,6 +223,144 @@ def retry_api(func, max_retries=4):
                 time.sleep(wait)
             else:
                 raise
+
+
+def load_api_keys() -> list:
+    """API keys for video generation: AGNESAI_API_KEYS (comma-separated)
+    or a single AGNESAI_API_KEY. One worker thread per key in parallel mode."""
+    raw = os.environ.get("AGNESAI_API_KEYS", "").strip()
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if not keys:
+        keys = [API_KEY] if API_KEY else []
+    return keys
+
+
+def _run_serial(api_key, work_items, project, duration, aspect_ratio):
+    """Original single-key path: process scenes one by one (65s apart)."""
+    total = len(work_items)
+    for i, item in enumerate(work_items):
+        sid = item["sid"]
+        out_file = item["out_file"]
+        refs, prompt, scene_audios = item["refs"], item["prompt"], item["audios"]
+
+        print(f"  🎥 [{i+1}/{total}] scene-{sid}: {item['title'][:30]}...")
+        try:
+            video_id = retry_api(
+                lambda: submit_video(prompt, refs, duration, aspect_ratio, scene_audios, api_key)
+            )
+            print(f"     submitted: {video_id} ({len(refs)} refs, {len(scene_audios)} audio)")
+            video_url = poll_video(video_id, api_key=api_key)
+            mp4_data = urllib.request.urlopen(video_url).read()
+            out_file.write_bytes(mp4_data)
+            track_file(project, "video", str(out_file), f"视频 scene-{sid}", f"duration={duration}s")
+            print(f"     ✅ {out_file.name} ({len(mp4_data)//1024}KB)")
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503):
+                print(f"     ❌ scene-{sid} 提交失败 (HTTP {e.code})，重试 {4} 次后仍被限流/队列满")
+                print("⚠️  Agnes 视频队列已满，本轮停止。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
+                sys.exit(3)
+            print(f"     ❌ 提交失败 (HTTP {e.code}): {e.reason}")
+        except OSError as e:
+            # network hiccups (read timeout / connection reset): fail fast so the
+            # caller's retry loop restarts quickly instead of sleeping 65s per scene
+            print(f"     ⏱  网络瞬时故障（{str(e)[:60] or '连接中断'}），本轮停止")
+            print("⚠️  网络不稳或队列繁忙。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
+            sys.exit(3)
+        except Exception as e:
+            print(f"     ❌ 失败: {e}")
+
+        if i < total - 1:
+            print(f"     ⏱  等待 {VIDEO_INTERVAL_SEC}s (剩余 {total - i - 1} 个)...")
+            time.sleep(VIDEO_INTERVAL_SEC)
+
+
+def _run_parallel(api_keys, work_items, project, duration, aspect_ratio):
+    """One worker thread per API key; shared scene queue, per-key 65s pacing.
+
+    A scene that hits a persistent 429/503 or a network error is released
+    back to the queue and the worker cools down 90s while other workers
+    keep moving. A 25-minute no-progress watchdog exits the round (exit 3)
+    so an outer retry loop can restart it.
+    """
+    lock = threading.Lock()
+    state = {"claimed": {}, "done": 0, "last_progress": time.time()}
+    for w in work_items:
+        state["claimed"][id(w)] = False
+
+    def worker(idx, key):
+        last_submit = 0.0
+        while True:
+            with lock:
+                item = next((w for w in work_items
+                             if not w["out_file"].exists()
+                             and not state["claimed"][id(w)]), None)
+                if item is None:
+                    return
+                state["claimed"][id(item)] = True
+            sid = item["sid"]
+            tag = f"[W{idx}] scene-{sid}"
+
+            wait = last_submit + VIDEO_INTERVAL_SEC - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            last_submit = time.time()
+
+            print(f"  🎥 {tag} 开始 ({len(item['refs'])} refs, {len(item['audios'])} audio)")
+            try:
+                video_id = retry_api(
+                    lambda: submit_video(item["prompt"], item["refs"], duration,
+                                         aspect_ratio, item["audios"], key)
+                )
+                print(f"     submitted: {video_id} ({len(item['refs'])} refs)")
+                video_url = poll_video(video_id, api_key=key)
+                mp4_data = urllib.request.urlopen(video_url).read()
+                item["out_file"].write_bytes(mp4_data)
+                with lock:
+                    track_file(project, "video", str(item["out_file"]),
+                               f"视频 scene-{sid}", f"duration={duration}s")
+                    state["done"] += 1
+                    state["last_progress"] = time.time()
+                print(f"     ✅ {tag} {item['out_file'].name} ({len(mp4_data)//1024}KB)")
+            except urllib.error.HTTPError as e:
+                with lock:
+                    state["claimed"][id(item)] = False
+                if e.code in (429, 503):
+                    print(f"     ⏱ {tag} 重试后仍 HTTP {e.code}，worker 稍后再试")
+                    time.sleep(90)
+                else:
+                    print(f"     ❌ {tag} 提交失败 (HTTP {e.code}): {e.reason}")
+                    time.sleep(30)
+            except OSError as e:
+                with lock:
+                    state["claimed"][id(item)] = False
+                print(f"     ⏱ {tag} 网络瞬时故障（{str(e)[:60] or '连接中断'}），worker 稍后再试")
+                time.sleep(90)
+            except Exception as e:
+                with lock:
+                    state["claimed"][id(item)] = False
+                print(f"     ❌ {tag} 失败: {e}")
+                time.sleep(30)
+
+    threads = []
+    for i in range(len(api_keys)):
+        t = threading.Thread(target=worker, args=(i, api_keys[i]),
+                             name=f"video-worker-{i}")
+        t.daemon = True
+        t.start()
+        threads.append(t)
+        time.sleep(1)  # stagger starts so first submits don't pile into one second
+
+    while any(t.is_alive() for t in threads):
+        time.sleep(10)
+        with lock:
+            stall = time.time() - state["last_progress"]
+            done = state["done"]
+        if stall > 1500:
+            missing = sum(1 for w in work_items if not w["out_file"].exists())
+            print(f"⚠️  全部 worker 已停滞 {int(stall//60)} 分钟（队列满/网络），"
+                  f"本轮停止。剩余 {missing} 段，稍后重新运行本脚本即可续跑。")
+            sys.exit(3)
+    _ = done
 
 
 def main():
@@ -254,32 +412,32 @@ def main():
                    "description": f.stem, "description_zh": f.stem} for f in scene_files]
 
     total = len(scenes)
+    n_keys = len(load_api_keys())
     print(f"🎬 生成 {total} 个视频片段")
     print(f"   模式: {mode_label}")
+    print(f"   Key: {n_keys} 个（{'并行' if n_keys > 1 else '串行'}）")
     print(f"   时长: {duration}s/段 | 间隔: {VIDEO_INTERVAL_SEC}s")
-    est_min = total * 5
+    est_min = max(1, total // max(1, n_keys)) * 5
     print(f"   预计总耗时: ~{est_min} 分钟\n")
 
-    for i, scene in enumerate(scenes):
+    # ---- build per-scene work items (refs / prompt / audio refs) ----
+    work_items = []
+    for scene in scenes:
         sid = scene.get("scene_id", 0)
         out_file = video_dir / f"scene-{sid}.mp4"
         if out_file.exists():
             print(f"  ⏭  scene-{sid} 已存在，跳过")
             continue
 
-        # Build image refs for this scene
         refs = []
         if has_urls:
-            # Use the specific scene image + character refs
             scene_key = f"scene-{sid}"
             if scene_key in image_urls:
                 refs.append(image_urls[scene_key])
-            # Add character refs
             char_refs = [v for k, v in image_urls.items() if k.startswith("char-")]
             refs.extend(char_refs[:4])  # Keep total <= 5
             refs = refs[:5]
 
-        # Build prompt
         desc_en = scene.get("description", "")
         desc_zh = scene.get("description_zh", "")
         style = config.get("style", "动画")
@@ -287,7 +445,6 @@ def main():
                       "赛博朋克": "cyberpunk", "二次元": "2D anime"}.get(style, "anime")
         prompt = f"{style_word} style, smooth animation. {desc_en}. {desc_zh[:60]}"
 
-        # Per-scene audio refs (line-<sid>-1.mp3 .. line-<sid>-3.mp3, max 3)
         scene_audios = [tts_urls[f"line-{sid}-{n}.mp3"]
                         for n in range(1, 4) if f"line-{sid}-{n}.mp3" in tts_urls]
         if scene_audios:
@@ -295,37 +452,35 @@ def main():
             prompt += (f" The character is speaking; the mouth moves naturally, "
                        f"in sync with the reference audio {markers}.")
 
-        print(f"  🎥 [{i+1}/{total}] scene-{sid}: {scene.get('title', '')[:30]}...")
-        try:
-            video_id = retry_api(
-                lambda: submit_video(prompt, refs, duration, aspect_ratio, scene_audios)
-            )
-            print(f"     submitted: {video_id} ({len(refs)} refs, {len(scene_audios)} audio)")
-            video_url = poll_video(video_id)
-            mp4_data = urllib.request.urlopen(video_url).read()
-            out_file.write_bytes(mp4_data)
-            track_file(project, "video", str(out_file), f"视频 scene-{sid}", f"duration={duration}s")
-            print(f"     ✅ {out_file.name} ({len(mp4_data)//1024}KB)")
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503):
-                print(f"     ❌ scene-{sid} 提交失败 (HTTP {e.code})，重试 {4} 次后仍被限流/队列满")
-                print("⚠️  Agnes 视频队列已满，本轮停止。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
-                sys.exit(3)
-            print(f"     ❌ 提交失败 (HTTP {e.code}): {e.reason}")
-        except OSError as e:
-            # network hiccups (read timeout / connection reset): fail fast so the
-            # caller's retry loop restarts quickly instead of sleeping 65s per scene
-            print(f"     ⏱  网络瞬时故障（{str(e)[:60] or '连接中断'}），本轮停止")
-            print("⚠️  网络不稳或队列繁忙。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
-            sys.exit(3)
-        except Exception as e:
-            print(f"     ❌ 失败: {e}")
+        work_items.append({"sid": sid, "out_file": out_file, "refs": refs,
+                          "prompt": prompt, "audios": scene_audios,
+                          "title": scene.get("title", "")})
 
-        # Rate limit: wait before next
-        if i < total - 1:
-            remaining = total - i - 1
-            print(f"     ⏱  等待 {VIDEO_INTERVAL_SEC}s (剩余 {remaining} 个)...")
-            time.sleep(VIDEO_INTERVAL_SEC)
+    if not work_items:
+        print(f"\n✅ 所有 {total} 个片段已存在，无需生成。")
+        print(f"\n✅ 视频目录: {video_dir}/")
+        print("\n下一步：")
+        print(f"  [1] 拼接完整视频 → python merge-videos.py \"{project}\"")
+        print(f"  [2] 重新生成某场景 → python gen-video.py \"{project}\" --scene N")
+        print(f"  [3] 完成 🎬")
+        return
+
+    # ---- dispatch: serial (single key) or parallel (multi-key) ----
+    api_keys = load_api_keys()
+    if len(api_keys) <= 1:
+        print(f"\n开始串行生成 {len(work_items)} 个片段（单 key）...\n")
+        _run_serial(api_keys[0] if api_keys else None, work_items,
+                    project, duration, aspect_ratio)
+    else:
+        print(f"\n开始并行生成 {len(work_items)} 个片段（{len(api_keys)} 个 key，"
+              f"每个 worker 间隔 {VIDEO_INTERVAL_SEC}s）...\n")
+        _run_parallel(api_keys, work_items, project, duration, aspect_ratio)
+
+    missing = [w["sid"] for w in work_items if not w["out_file"].exists()]
+    if missing:
+        print(f"\n⚠️  本轮结束，仍缺 {len(missing)} 段: scene-{', scene-'.join(map(str, missing))}")
+        print("⚠️  稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
+        sys.exit(3)
 
     print(f"\n✅ 视频生成完成，保存在 {video_dir}/")
     print("\n下一步：")
