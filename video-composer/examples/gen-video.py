@@ -150,14 +150,43 @@ def upload_tts_audio(project: str, audio_files: list) -> dict:
         if r.returncode != 0:  # staged changes exist
             _git(["-c", "user.name=comic-studio", "-c", "user.email=comic-studio@local",
                   "commit", "-q", "-m", f"{project}: update TTS audio references"], cwd=cache)
-            p = _git(["push", "-q", "origin", branch], cwd=cache)
+            p = _git(["push", "-q", "origin", branch], cwd=cache, timeout=300)
             if p.returncode != 0:
                 print(f"   ⚠️  TTS 推送失败（{p.stderr.strip().splitlines()[-1] if p.stderr.strip() else '未知错误'}），本次仅用图片参考")
                 return {}
         print(f"   📤  已上传 {len(audio_files)} 段 TTS → github.com/{repo}/{project}/")
 
     base = f"https://raw.githubusercontent.com/{repo}/{branch}/{project}/"
-    return {a.name: base + a.name for a in audio_files}
+    urls = {a.name: base + a.name for a in audio_files}
+
+    # Agnes rejects video tasks with HTTP 400 when an `audios` URL is not
+    # fetchable; GitHub raw can lag a push by 30-60s. Verify reachability
+    # before handing URLs to the model, fall back to image-only otherwise.
+    proxy = os.environ.get("AGNES_GIT_PROXY", "").strip()
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    else:
+        opener = urllib.request
+    broken = []
+    for u in urls.values():
+        ok = False
+        for _ in range(3):
+            try:
+                with opener.open(u, timeout=30) as r:
+                    ok = (r.status == 200)
+                if ok:
+                    break
+            except Exception:
+                time.sleep(20)
+        if not ok:
+            broken.append(u)
+    if broken:
+        print(f"   ⚠️  {len(broken)} 个 TTS raw URL 暂不可达（GitHub 传播延迟/网络），本次仅用图片参考")
+        for u in broken[:3]:
+            print(f"      - {u}")
+        return {}
+    return urls
 
 
 def submit_video(prompt: str, image_refs: list = None,
@@ -300,6 +329,12 @@ def _run_serial(pair, work_items, project, duration, aspect_ratio):
                 print(f"     ❌ scene-{sid} 提交失败 (HTTP {e.code})，重试 {4} 次后仍被限流/队列满")
                 print("⚠️  Agnes 视频队列已满，本轮停止。稍后重新运行本脚本即可续跑（已完成的片段会自动跳过）。")
                 sys.exit(3)
+            if e.code == 400:
+                body = e.read().decode("utf-8", "replace")[:300]
+                print(f"     ❌ scene-{sid} 提交被拒 (HTTP 400): {body}")
+                print("⚠️  400 是永久性参数/参考校验失败（常见：分镜图或 TTS 的参考 URL 不可达），"
+                      "本轮停止。修正参考源后重跑。")
+                sys.exit(3)
             print(f"     ❌ 提交失败 (HTTP {e.code}): {e.reason}")
         except OSError as e:
             # network hiccups (read timeout / connection reset): fail fast so the
@@ -325,7 +360,7 @@ def _run_parallel(api_pairs, work_items, project, duration, aspect_ratio):
     so an outer retry loop can restart it.
     """
     lock = threading.Lock()
-    state = {"claimed": {}, "done": 0, "last_progress": time.time()}
+    state = {"claimed": {}, "done": 0, "last_progress": time.time(), "fatal": False}
     for w in work_items:
         state["claimed"][id(w)] = False
 
@@ -370,6 +405,14 @@ def _run_parallel(api_pairs, work_items, project, duration, aspect_ratio):
                 if e.code in (429, 503):
                     print(f"     ⏱ {tag} 重试后仍 HTTP {e.code}，worker 稍后再试")
                     time.sleep(90)
+                elif e.code == 400:
+                    body = e.read().decode("utf-8", "replace")[:300]
+                    print(f"     ❌ {tag} 提交被拒 (HTTP 400): {body}")
+                    print("⚠️  400 为永久性错误（参考 URL 不可达/参数校验失败），停止本轮。"
+                          "修正参考源后重跑。")
+                    with lock:
+                        state["fatal"] = True
+                    return
                 else:
                     print(f"     ❌ {tag} 提交失败 (HTTP {e.code}): {e.reason}")
                     time.sleep(30)
@@ -398,6 +441,11 @@ def _run_parallel(api_pairs, work_items, project, duration, aspect_ratio):
         with lock:
             stall = time.time() - state["last_progress"]
             done = state["done"]
+            fatal = state["fatal"]
+        if fatal:
+            missing = sum(1 for w in work_items if not w["out_file"].exists())
+            print(f"⚠️  检测到永久性提交失败 (400)，本轮停止。剩余 {missing} 段。")
+            sys.exit(3)
         if stall > 1500:
             missing = sum(1 for w in work_items if not w["out_file"].exists())
             print(f"⚠️  全部 worker 已停滞 {int(stall//60)} 分钟（队列满/网络），"
