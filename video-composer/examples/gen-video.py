@@ -10,11 +10,18 @@ that PUBLIC GitHub repo and passed as `audios` reference — the model then
 animates speaking mouths roughly in sync with the line audio. Without it,
 videos are generated image-only (mouths not synced to dialogue).
 
-Multi-key parallel (optional): set AGNESAI_API_KEYS=key1,key2,... in .env to
-generate clips in parallel — one worker thread per key, each keeping its own
-65s submit rhythm. Without it, generation is serial on AGNESAI_API_KEY.
-Note: the server-side video queue is global; extra keys speed up the serial
-65s chain but cannot exceed the queue's own concurrency.
+Multi-key parallel (optional): set AGNESAI_API_KEYS in .env to generate clips
+in parallel — one worker thread per key, each keeping its own 65s submit
+rhythm. Entries accept an optional per-key platform override:
+
+    AGNESAI_API_KEYS=sk-domestic,sk-intl@https://apihub.agnes-ai.com/v1
+                     ^^^^^^^^^ default AGNESAI_BASE_URL   ^^^^^^^^^^^^^
+                     ^^^^^^^^^^^^^ explicit base URL (international platform)
+
+Without AGNESAI_API_KEYS, generation is serial on AGNESAI_API_KEY.
+Note: the server-side video queue is global PER PLATFORM; extra keys speed up
+the serial 65s chain and mix platforms (domestic + international in parallel),
+but cannot exceed each platform's own queue cap.
 
 Rate limit (agnes-video-2.5-flash):
   - 1 次/分钟（每次提交间隔 >= 65s，按 key 独立计算）
@@ -39,12 +46,23 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from load_env import API_KEY, PROJECT_ROOT
+from load_env import API_KEY, API_BASE_URL, PROJECT_ROOT
 from track import track_file
 
-BASE_VIDEO = "https://api.agnes-ai.cn/v1/videos"
-BASE_POLL = "https://api.agnes-ai.cn/agnesapi"
 VIDEO_INTERVAL_SEC = 65
+
+
+def _video_submit_url(base: str) -> str:
+    """POST endpoint for creating video tasks (base is the /v1 OpenAI-style root)."""
+    return base.rstrip("/") + "/videos"
+
+
+def _video_poll_url(base: str) -> str:
+    """Task-poll endpoint: sibling of /v1 on the same host (e.g. .../agnesapi)."""
+    host = base.rstrip("/")
+    if host.endswith("/v1"):
+        host = host[:-3]
+    return host.rstrip("/") + "/agnesapi"
 
 
 def validate_duration(seconds: str) -> str:
@@ -144,14 +162,17 @@ def upload_tts_audio(project: str, audio_files: list) -> dict:
 
 def submit_video(prompt: str, image_refs: list = None,
                  seconds: str = "5", aspect_ratio: str = "16:9",
-                 audios: list = None, api_key: str = None) -> str:
+                 audios: list = None, api_key: str = None,
+                 base_url: str = None) -> str:
     """Submit video task. Uses reference mode if image_refs/audios provided.
 
     audios: up to 3 public URLs (e.g. TTS lines) passed as `audios` reference;
     reference them in the prompt with <Audio 1>, <Audio 2>, ...
-    api_key: override the default AGNESAI_API_KEY (multi-key parallel mode).
+    api_key / base_url: override the default AGNESAI_API_KEY / AGNESAI_BASE_URL
+    (multi-key multi-platform mode, see load_api_pairs).
     """
     key = api_key or API_KEY
+    base = (base_url or API_BASE_URL).rstrip("/")
     # Validate: max 5 image refs, max 3 audio refs
     refs = (image_refs or [])[:5]
     auds = (audios or [])[:3]
@@ -175,7 +196,7 @@ def submit_video(prompt: str, image_refs: list = None,
 
     data = json.dumps(body).encode()
     req = urllib.request.Request(
-        BASE_VIDEO, data=data,
+        _video_submit_url(base), data=data,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST"
     )
@@ -183,11 +204,13 @@ def submit_video(prompt: str, image_refs: list = None,
     return json.loads(resp)["video_id"]
 
 
-def poll_video(video_id: str, timeout=600, interval=30, api_key: str = None) -> str:
+def poll_video(video_id: str, timeout=600, interval=30, api_key: str = None,
+               base_url: str = None) -> str:
     key = api_key or API_KEY
+    base = (base_url or API_BASE_URL).rstrip("/")
     elapsed = 0
     while elapsed < timeout:
-        url = f"{BASE_POLL}?video_id={video_id}&model_name=agnes-video-2.5-flash"
+        url = f"{_video_poll_url(base)}?video_id={video_id}&model_name=agnes-video-2.5-flash"
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
         resp = urllib.request.urlopen(req, timeout=60).read()
         result = json.loads(resp)
@@ -225,18 +248,35 @@ def retry_api(func, max_retries=4):
                 raise
 
 
-def load_api_keys() -> list:
-    """API keys for video generation: AGNESAI_API_KEYS (comma-separated)
-    or a single AGNESAI_API_KEY. One worker thread per key in parallel mode."""
+def load_api_pairs() -> list:
+    """API key/platform pairs for video generation.
+
+    AGNESAI_API_KEYS entries (comma-separated): "sk-..." or "sk-...@baseURL".
+    An entry without @ uses the default AGNESAI_BASE_URL (domestic platform).
+    This lets one run mix domestic + international keys/platforms in parallel.
+    Without AGNESAI_API_KEYS: a single pair (AGNESAI_API_KEY, AGNESAI_BASE_URL).
+    """
     raw = os.environ.get("AGNESAI_API_KEYS", "").strip()
-    keys = [k.strip() for k in raw.split(",") if k.strip()]
-    if not keys:
-        keys = [API_KEY] if API_KEY else []
-    return keys
+    pairs = []
+    if raw:
+        for entry in raw.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if "@" in entry:
+                key, base = entry.split("@", 1)
+                pairs.append((key.strip(), base.strip().rstrip("/")))
+            else:
+                pairs.append((entry, API_BASE_URL))
+    if not pairs:
+        pairs = [(API_KEY, API_BASE_URL)] if API_KEY else []
+    return pairs
 
 
-def _run_serial(api_key, work_items, project, duration, aspect_ratio):
-    """Original single-key path: process scenes one by one (65s apart)."""
+def _run_serial(pair, work_items, project, duration, aspect_ratio):
+    """Single-key path: process scenes one by one (65s apart).
+    pair = (api_key, base_url)."""
+    api_key, base_url = pair
     total = len(work_items)
     for i, item in enumerate(work_items):
         sid = item["sid"]
@@ -246,10 +286,11 @@ def _run_serial(api_key, work_items, project, duration, aspect_ratio):
         print(f"  🎥 [{i+1}/{total}] scene-{sid}: {item['title'][:30]}...")
         try:
             video_id = retry_api(
-                lambda: submit_video(prompt, refs, duration, aspect_ratio, scene_audios, api_key)
+                lambda: submit_video(prompt, refs, duration, aspect_ratio,
+                                     scene_audios, api_key, base_url)
             )
             print(f"     submitted: {video_id} ({len(refs)} refs, {len(scene_audios)} audio)")
-            video_url = poll_video(video_id, api_key=api_key)
+            video_url = poll_video(video_id, api_key=api_key, base_url=base_url)
             mp4_data = urllib.request.urlopen(video_url).read()
             out_file.write_bytes(mp4_data)
             track_file(project, "video", str(out_file), f"视频 scene-{sid}", f"duration={duration}s")
@@ -274,8 +315,9 @@ def _run_serial(api_key, work_items, project, duration, aspect_ratio):
             time.sleep(VIDEO_INTERVAL_SEC)
 
 
-def _run_parallel(api_keys, work_items, project, duration, aspect_ratio):
-    """One worker thread per API key; shared scene queue, per-key 65s pacing.
+def _run_parallel(api_pairs, work_items, project, duration, aspect_ratio):
+    """One worker thread per key/platform pair; shared scene queue, per-key
+    65s pacing. Works across platforms (domestic + international keys mix).
 
     A scene that hits a persistent 429/503 or a network error is released
     back to the queue and the worker cools down 90s while other workers
@@ -287,7 +329,8 @@ def _run_parallel(api_keys, work_items, project, duration, aspect_ratio):
     for w in work_items:
         state["claimed"][id(w)] = False
 
-    def worker(idx, key):
+    def worker(idx, pair):
+        key, base_url = pair
         last_submit = 0.0
         while True:
             with lock:
@@ -305,14 +348,14 @@ def _run_parallel(api_keys, work_items, project, duration, aspect_ratio):
                 time.sleep(wait)
             last_submit = time.time()
 
-            print(f"  🎥 {tag} 开始 ({len(item['refs'])} refs, {len(item['audios'])} audio)")
+            print(f"  🎥 {tag} 开始 ({len(item['refs'])} refs, {len(item['audios'])} audio) {base_url}")
             try:
                 video_id = retry_api(
                     lambda: submit_video(item["prompt"], item["refs"], duration,
-                                         aspect_ratio, item["audios"], key)
+                                         aspect_ratio, item["audios"], key, base_url)
                 )
                 print(f"     submitted: {video_id} ({len(item['refs'])} refs)")
-                video_url = poll_video(video_id, api_key=key)
+                video_url = poll_video(video_id, api_key=key, base_url=base_url)
                 mp4_data = urllib.request.urlopen(video_url).read()
                 item["out_file"].write_bytes(mp4_data)
                 with lock:
@@ -342,8 +385,8 @@ def _run_parallel(api_keys, work_items, project, duration, aspect_ratio):
                 time.sleep(30)
 
     threads = []
-    for i in range(len(api_keys)):
-        t = threading.Thread(target=worker, args=(i, api_keys[i]),
+    for i in range(len(api_pairs)):
+        t = threading.Thread(target=worker, args=(i, api_pairs[i]),
                              name=f"video-worker-{i}")
         t.daemon = True
         t.start()
@@ -412,7 +455,8 @@ def main():
                    "description": f.stem, "description_zh": f.stem} for f in scene_files]
 
     total = len(scenes)
-    n_keys = len(load_api_keys())
+    api_pairs = load_api_pairs()
+    n_keys = len(api_pairs)
     print(f"🎬 生成 {total} 个视频片段")
     print(f"   模式: {mode_label}")
     print(f"   Key: {n_keys} 个（{'并行' if n_keys > 1 else '串行'}）")
@@ -465,16 +509,18 @@ def main():
         print(f"  [3] 完成 🎬")
         return
 
-    # ---- dispatch: serial (single key) or parallel (multi-key) ----
-    api_keys = load_api_keys()
-    if len(api_keys) <= 1:
+    # ---- dispatch: serial (single key) or parallel (multi-key/multi-platform) ----
+    api_pairs = load_api_pairs()
+    if len(api_pairs) <= 1:
         print(f"\n开始串行生成 {len(work_items)} 个片段（单 key）...\n")
-        _run_serial(api_keys[0] if api_keys else None, work_items,
+        _run_serial(api_pairs[0] if api_pairs else None, work_items,
                     project, duration, aspect_ratio)
     else:
-        print(f"\n开始并行生成 {len(work_items)} 个片段（{len(api_keys)} 个 key，"
-              f"每个 worker 间隔 {VIDEO_INTERVAL_SEC}s）...\n")
-        _run_parallel(api_keys, work_items, project, duration, aspect_ratio)
+        platforms = sorted({b for _, b in api_pairs})
+        plat_label = "、".join(p.split("/")[2] for p in platforms)
+        print(f"\n开始并行生成 {len(work_items)} 个片段（{len(api_pairs)} 个 key，"
+              f"平台: {plat_label}，每个 worker 间隔 {VIDEO_INTERVAL_SEC}s）...\n")
+        _run_parallel(api_pairs, work_items, project, duration, aspect_ratio)
 
     missing = [w["sid"] for w in work_items if not w["out_file"].exists()]
     if missing:

@@ -41,19 +41,26 @@ Agnes 视频 API 的 reference 模式支持 `audios` 参数（最多 3 段，URL
 对口型；要逐音素级需另接 Wav2Lip/MuseTalk 类后处理。未配置仓库时自动退回
 纯图片参考，不影响流程。
 
-## 多 Key 并行（可选，加速）
+## 多 Key 并行 / 多平台（可选，加速）
 
-Agnes 免费配额按 key 独立分池。`.env` 配置 `AGNESAI_API_KEYS=key1,key2,key3`
-（逗号分隔）后，`gen-video.py` 按 key 数开等量 worker 线程，各守自己的 65s
-提交节奏，从共享场景队列领任务：
+Agnes 免费配额按 key 独立分池，且**国内站（api.agnes-ai.cn）与国际站
+（apihub.agnes-ai.com）是两个平台、两条队列**。`.env` 配置
+`AGNESAI_API_KEYS`（逗号分隔）后，`gen-video.py` 按 key 数开等量 worker
+线程，各守自己的 65s 提交节奏，从共享场景队列领任务：
 
-- N 段视频、K 个 key → 墙钟 ≈ ⌈N/K⌉ × (65s + 渲染)，单 key 为 N × (65s + 渲染)
+```ini
+# 国内 key + 国际 key 混合并行（key@baseURL 语法，不带 @ 用 AGNESAI_BASE_URL 默认国内）
+AGNESAI_API_KEYS=sk-国内key,sk-国际key@https://apihub.agnes-ai.com/v1
+```
+
+- N 段视频、K 个 key → 墙钟 ≈ ⌈N/K⌉ × (65s + 渲染)，且国内/国际队列互不影响
 - 某 worker 被 429/503/网络故障卡住时冷却 90s，其他 worker 继续跑
 - 全体 25 分钟无进展 → 本轮 exit 3（外层重试循环照旧兜底）
 - 不配置则单 key 串行，行为与原来一致
 
-注意：`video_queue_full`（503）大概率是服务端**全局队列**，多 key 能消除
-"单 key 串行堵死"的问题，但不能突破该队列自身的并发上限。
+注意：单平台内的 `video_queue_full`（503）仍是该平台的**全局队列**，多 key
+能消除"单 key 串行堵死"的问题，但不能突破单平台自身的并发上限——跨平台
+混合（国内 + 国际）才能真正翻倍吞吐。
 
 推荐流程顺序：**写剧本 → 分镜图 → 配音（TTS）→ 视频（带音频参考）→ 字幕 → 合成**。
 

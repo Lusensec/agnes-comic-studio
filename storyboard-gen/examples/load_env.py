@@ -66,6 +66,15 @@ _load_env()
 # ------------------------------------------------------------- config values
 API_KEY = os.environ.get("AGNESAI_API_KEY", "")
 
+# API base URL (OpenAI-style /v1 base). Domestic default; override in .env
+# (AGNESAI_BASE_URL) to use the international platform (e.g.
+# https://apihub.agnes-ai.com/v1) or any compatible endpoint.
+API_BASE_URL = (
+    os.environ.get("AGNESAI_BASE_URL", "https://api.agnes-ai.cn/v1").strip()
+    .rstrip("/")
+    or "https://api.agnes-ai.cn/v1"
+)
+
 # Configurable project root: env var > .env > default
 PROJECT_ROOT = Path(
     os.environ.get(
